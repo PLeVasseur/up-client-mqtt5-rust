@@ -18,10 +18,10 @@ use std::{
 
 use log::debug;
 use slab::Slab;
-use up_rust::{ComparableListener, UCode, UStatus};
+use up_rust::{ComparableOwnedListener, UCode, UStatus};
 
 pub(crate) type SubscriptionIdentifier = u16;
-type ListenerSet = HashSet<ComparableListener>;
+type ListenerSet = HashSet<ComparableOwnedListener>;
 type SubscriptionIds = Slab<(String, ListenerSet)>;
 type TopicMatcher = paho_mqtt::TopicMatcher<(usize, ListenerSet)>;
 
@@ -38,7 +38,7 @@ pub(crate) struct RegisteredListeners {
     // [impl->req~utransport-registerlistener-max-listeners~1]
     max_listeners_per_subscription: usize,
     #[cfg(test)]
-    ignored_message_listener: Option<ComparableListener>,
+    ignored_message_listener: Option<ComparableOwnedListener>,
 }
 
 impl Default for RegisteredListeners {
@@ -78,8 +78,11 @@ impl RegisteredListeners {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_ignored_message_listener(&mut self, listener: Arc<dyn up_rust::UListener>) {
-        self.ignored_message_listener = Some(ComparableListener::new(listener));
+    pub(crate) fn set_ignored_message_listener(
+        &mut self,
+        listener: Arc<dyn up_rust::UOwnedListener>,
+    ) {
+        self.ignored_message_listener = Some(ComparableOwnedListener::new(listener));
     }
 
     /// Resets this registry to its initial state.
@@ -133,9 +136,9 @@ impl RegisteredListeners {
     pub(crate) fn add_listener(
         &mut self,
         topic_filter: &str,
-        listener: Arc<dyn up_rust::UListener>,
+        listener: Arc<dyn up_rust::UOwnedListener>,
     ) -> Result<Option<SubscriptionIdentifier>, UStatus> {
-        let comp_listener = ComparableListener::new(listener);
+        let comp_listener = ComparableOwnedListener::new(listener);
 
         // [impl->dsn~utransport-registerlistener-idempotent~1]
         // [impl->dsn~utransport-registerlistener-listener-reuse~1]
@@ -197,13 +200,13 @@ impl RegisteredListeners {
     pub(crate) fn is_last_listener(
         &self,
         topic_filter: &str,
-        listener: Arc<dyn up_rust::UListener>,
+        listener: Arc<dyn up_rust::UOwnedListener>,
     ) -> bool {
         self.subscriptions_by_topic_filter
             .get(topic_filter)
             .is_some_and(|(_subscription_id, registered_listeners)| {
                 registered_listeners.len() == 1
-                    && registered_listeners.contains(&ComparableListener::new(listener))
+                    && registered_listeners.contains(&ComparableOwnedListener::new(listener))
             })
     }
 
@@ -224,7 +227,7 @@ impl RegisteredListeners {
     pub(crate) fn remove_listener(
         &mut self,
         topic_filter: &str,
-        listener: Arc<dyn up_rust::UListener>,
+        listener: Arc<dyn up_rust::UOwnedListener>,
     ) -> bool {
         let Some((sub_id, listeners_for_topic_filter)) =
             self.subscriptions_by_topic_filter.get_mut(topic_filter)
@@ -235,7 +238,7 @@ impl RegisteredListeners {
             "inconsistent state: could not find any listeners registered for subscription ID",
         );
 
-        let listener_to_remove = ComparableListener::new(listener);
+        let listener_to_remove = ComparableOwnedListener::new(listener);
         match (
             listeners_for_topic_filter.contains(&listener_to_remove),
             listeners_for_sub_id.contains(&listener_to_remove),
@@ -273,22 +276,22 @@ impl RegisteredListeners {
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait ListenerRegistry: Send + Sync {
     /// Determines listeners registered for topic filters that match a given topic.
-    fn determine_listeners_for_topic(&self, topic: &str) -> HashSet<ComparableListener>;
+    fn determine_listeners_for_topic(&self, topic: &str) -> HashSet<ComparableOwnedListener>;
 
     /// Determines listeners registered for a given subscription ID.
     fn determine_listeners_for_subscription_id(
         &self,
         subscription_id: SubscriptionIdentifier,
-    ) -> Option<HashSet<ComparableListener>>;
+    ) -> Option<HashSet<ComparableOwnedListener>>;
 
     #[cfg(test)]
     /// Gets the listener that should be invoked for messages that don't match any registered listeners.
-    fn get_ignored_message_listener(&self) -> Option<ComparableListener>;
+    fn get_ignored_message_listener(&self) -> Option<ComparableOwnedListener>;
 }
 
 impl ListenerRegistry for RegisteredListeners {
     /// Determines listeners registered for topic filters that match a given topic.
-    fn determine_listeners_for_topic(&self, topic: &str) -> HashSet<ComparableListener> {
+    fn determine_listeners_for_topic(&self, topic: &str) -> HashSet<ComparableOwnedListener> {
         let mut listeners_to_invoke = HashSet::new();
         self.subscriptions_by_topic_filter.matches(topic).for_each(
             |(_topic_filter, (_subscription_id, listeners))| {
@@ -304,14 +307,14 @@ impl ListenerRegistry for RegisteredListeners {
     fn determine_listeners_for_subscription_id(
         &self,
         subscription_id: SubscriptionIdentifier,
-    ) -> Option<HashSet<ComparableListener>> {
+    ) -> Option<HashSet<ComparableOwnedListener>> {
         self.subscriptions_by_id
             .get(subscription_id.into())
             .map(|(_topic_filter, listeners)| listeners.clone())
     }
 
     #[cfg(test)]
-    fn get_ignored_message_listener(&self) -> Option<ComparableListener> {
+    fn get_ignored_message_listener(&self) -> Option<ComparableOwnedListener> {
         self.ignored_message_listener.clone()
     }
 }
@@ -338,9 +341,21 @@ impl SubscribedTopicProvider for RegisteredListeners {
 
 #[cfg(test)]
 mod tests {
-    use up_rust::MockUListener;
+    use async_trait::async_trait;
+    use up_rust::{UOwnedFrame, UOwnedListener};
 
     use super::*;
+
+    struct NoopOwnedListener;
+
+    #[async_trait]
+    impl UOwnedListener for NoopOwnedListener {
+        async fn on_receive_owned(&self, _frame: UOwnedFrame) {}
+    }
+
+    fn new_listener() -> Arc<dyn UOwnedListener> {
+        Arc::new(NoopOwnedListener)
+    }
 
     #[test]
     #[should_panic]
@@ -352,8 +367,8 @@ mod tests {
     fn test_add_listener() {
         let topic_filter = "+/local_authority";
         let topic = "remote_authority/local_authority";
-        let listener = Arc::new(MockUListener::new());
-        let expected_listener = ComparableListener::new(listener.clone());
+        let listener = new_listener();
+        let expected_listener = ComparableOwnedListener::new(listener.clone());
         let mut registered_listeners = RegisteredListeners::default();
 
         assert!(registered_listeners
@@ -386,8 +401,8 @@ mod tests {
         assert!(listeners.len() == 1 && listeners.contains(&expected_listener));
 
         // [utest->dsn~utransport-registerlistener-number-of-listeners~1]
-        let other_listener = Arc::new(MockUListener::new());
-        let expected_other_listener = ComparableListener::new(other_listener.clone());
+        let other_listener = new_listener();
+        let expected_other_listener = ComparableOwnedListener::new(other_listener.clone());
         assert_ne!(expected_listener, expected_other_listener);
         assert!(registered_listeners
             .add_listener(topic_filter, other_listener)
@@ -405,8 +420,8 @@ mod tests {
     fn test_add_listener_fails_for_exhausted_resources() {
         let topic_filter_1 = "source_1/local_authority";
         let topic_filter_2 = "source_2/local_authority";
-        let listener = Arc::new(MockUListener::new());
-        let listener_2 = Arc::new(MockUListener::new());
+        let listener = new_listener();
+        let listener_2 = new_listener();
         // [utest->req~utransport-registerlistener-max-listeners~1]
         let mut registered_listeners = RegisteredListeners::new(1, 1);
 
@@ -424,7 +439,8 @@ mod tests {
             .expect("Failed to determine listeners for subscription ID");
 
         assert!(
-            listeners.len() == 1 && listeners.contains(&ComparableListener::new(listener.clone())),
+            listeners.len() == 1
+                && listeners.contains(&ComparableOwnedListener::new(listener.clone())),
             "It should have been possible to register a single listener for one topic filter"
         );
 
@@ -448,8 +464,8 @@ mod tests {
         let topic_1 = "remote_authority_1/local_authority";
         let topic_2 = "remote_authority_2/local_authority";
 
-        let listener = Arc::new(MockUListener::new());
-        let expected_listener = ComparableListener::new(listener.clone());
+        let listener = new_listener();
+        let expected_listener = ComparableOwnedListener::new(listener.clone());
         let mut registered_listeners = RegisteredListeners::default();
 
         assert!(registered_listeners
@@ -482,10 +498,10 @@ mod tests {
     #[test]
     fn test_remove_listener() {
         let topic_filter = "+/local_authority";
-        let listener_1 = Arc::new(MockUListener::new());
-        let comparable_listener_1 = ComparableListener::new(listener_1.clone());
-        let listener_2 = Arc::new(MockUListener::new());
-        let comparable_listener_2 = ComparableListener::new(listener_2.clone());
+        let listener_1 = new_listener();
+        let comparable_listener_1 = ComparableOwnedListener::new(listener_1.clone());
+        let listener_2 = new_listener();
+        let comparable_listener_2 = ComparableOwnedListener::new(listener_2.clone());
         let mut registered_listeners = RegisteredListeners::default();
 
         let subscription_id = registered_listeners
@@ -532,7 +548,7 @@ mod tests {
     #[test]
     fn test_get_subscribed_topics() {
         let topic_filter = "+/local_authority";
-        let listener = Arc::new(MockUListener::new());
+        let listener = new_listener();
         let mut registered_listeners = RegisteredListeners::default();
 
         assert!(registered_listeners.get_subscribed_topics().is_empty());

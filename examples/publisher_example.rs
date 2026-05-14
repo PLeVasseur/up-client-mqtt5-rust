@@ -16,7 +16,10 @@ use std::{str::FromStr, time::SystemTime};
 use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
-use up_rust::{UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri};
+use up_rust::{
+    UAttributes, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedTransport, UStatus,
+    UUri, UUID,
+};
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
 /// Publishes messages to a given topic using the MQTT 5 transport.
@@ -56,15 +59,19 @@ async fn main() -> Result<(), UStatus> {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let message = UMessageBuilder::publish(command.topic.clone())
-            .with_ttl(1000)
-            .build_with_payload(
-                current_time.to_string(),
-                UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
+        let header = UFrameHeader::new(
+            UAttributes::new(
+                UUID::build(),
+                command.topic.clone(),
+                None,
+                UMessageType::Publish,
             )
-            .expect("Failed to build message");
+            .with_ttl(1000),
+            UEncoding::from_content_type("text/plain"),
+        );
+        let message = UOwnedFrame::new(header, current_time.to_string().into_bytes());
 
-        if let Err(e) = client.send(message).await {
+        if let Err(e) = client.send_owned(message).await {
             error!(
                 "Failed to publish message [topic: {}]: {}",
                 command.topic.to_uri(true),

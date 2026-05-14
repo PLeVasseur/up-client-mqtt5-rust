@@ -13,9 +13,13 @@
 
 use std::{str::FromStr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use log::debug;
 use serial_test::serial;
-use up_rust::{MockUListener, UCode, UMessageBuilder, UTransport, UUri};
+use up_rust::{
+    UAttributes, UCode, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedListener,
+    UOwnedTransport, UUri, UUID,
+};
 
 mod common;
 
@@ -33,6 +37,30 @@ persistence true
 persistence_location /mosquitto/data/
 "#;
 
+struct NotifyingListener {
+    expected: UOwnedFrame,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl UOwnedListener for NotifyingListener {
+    async fn on_receive_owned(&self, frame: UOwnedFrame) {
+        debug!("handling message in listener");
+        assert_eq!(frame, self.expected);
+        self.notify.notify_one();
+    }
+}
+
+fn publish_frame(topic: UUri, payload: impl Into<Vec<u8>>) -> UOwnedFrame {
+    UOwnedFrame::new(
+        UFrameHeader::new(
+            UAttributes::new(UUID::build(), topic, None, UMessageType::Publish),
+            UEncoding::from_content_type("text/plain"),
+        ),
+        payload.into(),
+    )
+}
+
 #[test_case::test_case(Some(MOSQUITTO_CONFIG_W_PERSISTENCE); "for Mosquitto with persistence")]
 #[test_case::test_case(None; "for Mosquitto without persistence")]
 #[tokio::test]
@@ -46,22 +74,15 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
     let mosquitto =
         common::start_mosquitto(mosquitto_config, Some(PASSWD_FILE), None, Some(15000)).await;
     let topic = UUri::from_str("//publisher/A8000/2/8A50").expect("invalid topic URI");
-    let message_to_send = UMessageBuilder::publish(topic)
-        .build_with_payload(
-            "test_payload",
-            up_rust::UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-        )
-        .expect("Failed to build message");
+    let message_to_send = publish_frame(topic, "test_payload".as_bytes());
     let cloned_message = message_to_send.clone();
 
     let message_received = Arc::new(tokio::sync::Notify::new());
     let message_received_barrier = message_received.clone();
-    let mut listener = MockUListener::new();
-    listener.expect_on_receive().returning(move |msg| {
-        debug!("handling message in listener");
-        assert_eq!(msg, cloned_message);
-        message_received.notify_one();
-    });
+    let listener = NotifyingListener {
+        expected: cloned_message,
+        notify: message_received,
+    };
 
     let subscriber = common::create_up_transport_mqtt(
         "subscriber",
@@ -80,7 +101,7 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
     let source_filter =
         UUri::from_str("//publisher/A8000/2/FFFF").expect("Failed to create source filter");
     subscriber
-        .register_listener(&source_filter, None, Arc::new(listener))
+        .register_owned_listener(&source_filter, None, Arc::new(listener))
         .await
         .expect("failed to register listener");
 
@@ -101,7 +122,7 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
 
     // verify that a message sent by the publisher is received by the subscriber
     publisher
-        .send(message_to_send.clone())
+        .send_owned(message_to_send.clone())
         .await
         .expect("failed to publish message");
 
@@ -139,7 +160,7 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
 
     // publish the message again
     publisher
-        .send(message_to_send)
+        .send_owned(message_to_send)
         .await
         .expect("failed to publish message after reconnect");
 
@@ -221,7 +242,7 @@ async fn test_publish_fails_if_unauthorized() {
     let authorized_source = UUri::from_str("/A8000/2/8A50").unwrap();
     assert!(
         publisher
-            .send(UMessageBuilder::publish(authorized_source).build().unwrap())
+            .send_owned(publish_frame(authorized_source, Vec::new()))
             .await
             .is_ok(),
         "expected publishing to topic to succeed with correct authority"
@@ -230,11 +251,7 @@ async fn test_publish_fails_if_unauthorized() {
     let unauthorized_source = UUri::from_str("/100/1/B500").unwrap();
     assert!(
         publisher
-            .send(
-                UMessageBuilder::publish(unauthorized_source)
-                    .build()
-                    .unwrap()
-            )
+            .send_owned(publish_frame(unauthorized_source, Vec::new()))
             .await
             .is_err_and(|err| {
                 debug!("failed to publish message: {err:?}");

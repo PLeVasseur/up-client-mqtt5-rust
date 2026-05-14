@@ -14,21 +14,20 @@
 use std::{
     str::{self, FromStr},
     sync::Arc,
-    thread,
 };
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
-use up_rust::{UListener, UMessage, UStatus, UTransport, UUri};
+use up_rust::{UOwnedFrame, UOwnedListener, UOwnedTransport, UStatus, UUri};
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
 struct LoggingListener {}
 
 #[async_trait]
-impl UListener for LoggingListener {
-    async fn on_receive(&self, message: UMessage) {
+impl UOwnedListener for LoggingListener {
+    async fn on_receive_owned(&self, frame: UOwnedFrame) {
         // Make sure to not block the incoming message handler by spawning a new task
         // for processing the message.
         // Note that this does not per se guarantee that the message will be processed
@@ -36,11 +35,10 @@ impl UListener for LoggingListener {
         // does ensure that this function returns quickly, allowing the incoming message
         // handler to proceed as soon as possible.
         tokio::spawn(async move {
-            let msg_payload = message.payload.unwrap();
-            let msg_str: &str = str::from_utf8(&msg_payload).unwrap();
+            let msg_str: &str = str::from_utf8(frame.payload_bytes()).unwrap();
             info!("Received message: {msg_str}");
             // simulate some time consuming processing
-            thread::sleep(std::time::Duration::from_millis(500));
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             info!("Finished processing message");
         });
     }
@@ -85,7 +83,7 @@ async fn main() -> Result<(), UStatus> {
     );
 
     client
-        .register_listener(&command.topic_filter, None, listener.clone())
+        .register_owned_listener(&command.topic_filter, None, listener.clone())
         .await?;
     tokio::signal::ctrl_c()
         .await

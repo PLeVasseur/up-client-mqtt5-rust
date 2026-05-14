@@ -29,7 +29,7 @@ and does not spawn any threads itself.
 
 ## Using the Library
 
-Most developers will want to create an instance of the [Mqtt5Transport] struct and use it with uProtocol's Communication Layer API and its default implementation which are provided by the *up-rust* library. The crate also provides an implementation of [uProtocol's Transport & Session Layer API](up_rust::UTransport) which can be used to send and receive arbitrary (uProtocol) messages regardless of any message exchange patterns as imposed by the Communication Layer API.
+Most developers will want to create an instance of the [Mqtt5Transport] struct and use it with uProtocol's Communication Layer API. The crate also provides an implementation of uProtocol's native owned-frame transport API, [up_rust::UOwnedTransport], which can be used to send and receive arbitrary serializer-neutral uProtocol frames regardless of any message exchange patterns as imposed by the Communication Layer API.
 
 The libraries need to be added to the `[dependencies]` section of the `Cargo.toml` file:
 
@@ -57,9 +57,9 @@ use mqtt_client::MqttClientOperations;
 pub use mqtt_client::{MqttClientOptions, SslOptions};
 use paho_mqtt::{self as mqtt, Message, QOS_1};
 use tokio::{sync::RwLock, task::JoinHandle};
-#[allow(unused_imports)]
-use up_rust::UTransport;
-use up_rust::{ComparableListener, UAttributes, UCode, UMessage, UStatus, UUri, UUriError};
+use up_rust::{
+    ComparableOwnedListener, UCode, UFrameHeader, UOwnedFrame, UStatus, UUri, UUriError,
+};
 
 mod listener_registry;
 mod mapping;
@@ -237,14 +237,10 @@ async fn process_incoming_message(
     message_mapper: &dyn mapping::MessageMapper,
     mqtt_message: paho_mqtt::Message,
 ) {
-    // extract uProtocol message from MQTT PUBLISH packet
-    let umessage =
-        match message_mapper.create_uattributes_from_mqtt_properties(mqtt_message.properties()) {
-            Ok(uattributes) => UMessage {
-                attributes: Some(uattributes).into(),
-                payload: Some(Bytes::copy_from_slice(mqtt_message.payload())),
-                ..Default::default()
-            },
+    // Extract a native uProtocol frame from the MQTT PUBLISH packet.
+    let frame =
+        match message_mapper.create_frame_header_from_mqtt_properties(mqtt_message.properties()) {
+            Ok(header) => UOwnedFrame::new(header, Bytes::copy_from_slice(mqtt_message.payload())),
             Err(e) => {
                 // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
                 debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
@@ -279,16 +275,16 @@ async fn process_incoming_message(
         // It is the responsibility of the listener to spawn a new task
         // if processing the message is non-trivial.
         // This is a deliberate design choice to let implementers of
-        // `UListener` decide how to handle incoming messages and use
+        // `UOwnedListener` decide how to handle incoming messages and use
         // a custom tokio runtime configuration.
-        listener.on_receive(umessage.clone()).await;
+        listener.on_receive_owned(frame.clone()).await;
     }
 }
 
 fn determine_listeners(
     registered_listeners: &dyn listener_registry::ListenerRegistry,
     mqtt_message: &paho_mqtt::Message,
-) -> HashSet<ComparableListener> {
+) -> HashSet<ComparableOwnedListener> {
     let subscription_ids: Vec<SubscriptionIdentifier> = mqtt_message
         .properties()
         .iter(paho_mqtt::PropertyCode::SubscriptionIdentifier)
@@ -328,7 +324,7 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// The transport spawns a dedicated tokio task that listens for incoming messages
 /// and dispatches them to the listeners that have been registered using
-/// [up_rust::UTransport::register_listener].
+/// [up_rust::UOwnedTransport::register_owned_listener].
 ///
 /// <div class="warning">
 ///
@@ -342,13 +338,13 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// ### Supported Message Priority Levels
 ///
-/// The [Self::send] function always uses a standard MQTT 5 PUBLISH packet to transfer the message
+/// The [Self::send_owned] function always uses a standard MQTT 5 PUBLISH packet to transfer the message
 /// to the MQTT broker regardless of the service class (priority) set on a uProtocol message.
 ///
 /// ### Supported Message Delivery Methods
 ///
 /// The transport supports the [push delivery method](https://github.com/eclipse-uprotocol/up-spec/blob/v1.6.0-alpha.7/up-l1/README.adoc#5-message-delivery) only.
-/// The [Self::receive] function therefore always returns [UCode::UNIMPLEMENTED].
+/// The owned receive function therefore always returns [UCode::UNIMPLEMENTED].
 ///
 /// ### Maximum number of listeners
 ///
@@ -525,27 +521,18 @@ impl Mqtt5Transport {
     ///
     /// Returns an error if the given attributes are invalid or the
     /// message cannot be sent to the MQTT broker.
-    async fn send_message(
-        &self,
-        attributes: &UAttributes,
-        payload: Option<Bytes>,
-    ) -> Result<(), UStatus> {
+    async fn send_message(&self, header: &UFrameHeader, payload: Bytes) -> Result<(), UStatus> {
         // put metadata into MQTT 5 message properties
         let props = self
             .message_mapper
-            .create_mqtt_properties_from_uattributes(attributes)?;
+            .create_mqtt_properties_from_frame_header(header)?;
 
         // Get mqtt topic string from source and sink uuris
-        let src_uri = attributes.source.as_ref().ok_or_else(|| {
-            UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "uProtocol Message has no source URI",
-            )
-        })?;
+        let src_uri = header.attributes().source();
         // [impl->dsn~up-transport-mqtt5-e2e-topic-names~1]
         // [impl->dsn~up-transport-mqtt5-d2d-topic-names~1]
         let topic = self
-            .to_mqtt_topic_string(src_uri, attributes.sink.as_ref())
+            .to_mqtt_topic_string(src_uri, header.attributes().sink())
             .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
 
         let mut msg_builder = mqtt::MessageBuilder::new()
@@ -554,11 +541,9 @@ impl Mqtt5Transport {
             // QoS 1 makes sure that we notice if the transfer to the MQTT broker fails
             .qos(QOS_1);
 
-        if let Some(data) = payload {
-            // If there is payload to send, add it to the message unaltered.
-            // [impl->dsn~up-transport-mqtt5-payload-mapping~1]
-            msg_builder = msg_builder.payload(data);
-        }
+        // If there is payload to send, add it to the message unaltered.
+        // [impl->dsn~up-transport-mqtt5-payload-mapping~1]
+        msg_builder = msg_builder.payload(payload);
         let msg = msg_builder.finalize();
 
         self.mqtt_client
@@ -584,7 +569,7 @@ impl Mqtt5Transport {
     async fn add_listener(
         &self,
         topic_filter: &str,
-        listener: Arc<dyn up_rust::UListener>,
+        listener: Arc<dyn up_rust::UOwnedListener>,
     ) -> Result<(), UStatus> {
         let mut registered_listeners_write = self.registered_listeners.write().await;
         if let Some(subscription_id) =
@@ -618,7 +603,7 @@ impl Mqtt5Transport {
     async fn remove_listener(
         &self,
         topic_filter: &str,
-        listener: Arc<dyn up_rust::UListener>,
+        listener: Arc<dyn up_rust::UOwnedListener>,
     ) -> Result<(), UStatus> {
         let mut registered_listeners_write = self.registered_listeners.write().await;
         if registered_listeners_write.is_last_listener(topic_filter, listener.clone()) {
@@ -658,14 +643,31 @@ impl Mqtt5Transport {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, str::FromStr};
+    use std::{str::FromStr, sync::Arc};
 
+    use async_trait::async_trait;
     use mqtt_client::MockMqttClientOperations;
-    use up_rust::{MockUListener, UMessageBuilder, UPayloadFormat, UTransport, UUID};
+    use tokio::sync::{Mutex, RwLock};
+    use up_rust::{
+        UAttributes, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedListener,
+        UOwnedTransport, UUID,
+    };
 
     use test_case::test_case;
 
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingOwnedListener {
+        frames: Mutex<Vec<UOwnedFrame>>,
+    }
+
+    #[async_trait]
+    impl UOwnedListener for RecordingOwnedListener {
+        async fn on_receive_owned(&self, frame: UOwnedFrame) {
+            self.frames.lock().await.push(frame);
+        }
+    }
 
     fn create_mqtt_publish_message(
         message_mapper: &dyn mapping::MessageMapper,
@@ -673,21 +675,16 @@ mod tests {
         source: &UUri,
         payload: &str,
     ) -> paho_mqtt::Message {
-        let umessage = UMessageBuilder::publish(source.to_owned())
-            .with_message_id(uuid.clone())
-            .build_with_payload(payload.to_owned(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
-            .expect("failed to create UMessage");
+        let header = UFrameHeader::new(
+            UAttributes::new(uuid.clone(), source.to_owned(), None, UMessageType::Publish),
+            UEncoding::from_content_type("text/plain"),
+        );
         let mqtt_topic = TransportMode::InVehicle
             .to_mqtt_topic(source, None, "test_authority")
             .expect("failed to create MQTT topic string");
         let props = message_mapper
-            .create_mqtt_properties_from_uattributes(
-                umessage
-                    .attributes
-                    .as_ref()
-                    .expect("UMessage has no attributes"),
-            )
-            .expect("invalid uattributes");
+            .create_mqtt_properties_from_frame_header(&header)
+            .expect("invalid frame header");
         paho_mqtt::MessageBuilder::new()
             .topic(mqtt_topic)
             .payload(payload)
@@ -706,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_listener_subscribes_to_topic_filter() {
         let topic_filter = "+/local_authority";
-        let listener = Arc::new(MockUListener::new());
+        let listener = Arc::new(RecordingOwnedListener::default());
         let expected_topic_filter = topic_filter.to_string();
         let mut client_operations = MockMqttClientOperations::new();
         client_operations.expect_subscribe().once().return_once(
@@ -743,32 +740,13 @@ mod tests {
 
         let message_mapper = mapping::DefaultMessageMapper;
 
-        let message_id_1 = UUID::build();
-        let message_1 =
-            create_mqtt_publish_message(&message_mapper, &message_id_1, &source, "some payload");
         let message_id_2 = UUID::build();
         let message_2 =
             create_mqtt_publish_message(&message_mapper, &message_id_2, &source, "some payload");
-        let message_id_3 = UUID::build();
-        let message_3 =
-            create_mqtt_publish_message(&message_mapper, &message_id_3, &source, "some payload");
-        let mut expected_ignored_message_ids = VecDeque::new();
-        expected_ignored_message_ids.push_front(message_id_1.clone());
-        expected_ignored_message_ids.push_front(message_id_3.clone());
-
-        let mut ignored_message_listener = MockUListener::new();
-        ignored_message_listener
-            .expect_on_receive()
-            .times(2)
-            .returning(move |msg| {
-                let expected_id = expected_ignored_message_ids
-                    .pop_back()
-                    .expect("no more expected ignored message ids");
-                assert_eq!(msg.id_unchecked(), &expected_id);
-            });
 
         let mut listener_registry = RegisteredListeners::default();
-        listener_registry.set_ignored_message_listener(Arc::new(ignored_message_listener));
+        let ignored_message_listener = Arc::new(RecordingOwnedListener::default());
+        listener_registry.set_ignored_message_listener(ignored_message_listener.clone());
 
         let transport = Mqtt5Transport {
             mqtt_client: Arc::new(client_operations),
@@ -779,41 +757,29 @@ mod tests {
             message_callback_handle: None,
         };
 
-        // without any listener having been registered for the topic filter so far,
-        // an incoming message published to a topic that matches the filter
-        // should only be processed by the ignored message listener
-        transport.process_incoming_message(message_1).await;
-
-        let mut invoked_once = MockUListener::new();
-        invoked_once
-            .expect_on_receive()
-            .once()
-            .returning(move |msg| {
-                // we make sure that the message being processed is the one that
-                // has been published after the listener had been registered
-                assert_eq!(msg.id_unchecked(), &message_id_2);
-            });
-        let invoked_once = Arc::new(invoked_once);
+        let invoked_once = Arc::new(RecordingOwnedListener::default());
 
         // [utest->dsn~utransport-registerlistener-start-invoking-listeners~1]
         // after having registered a listener for the topic filter
         transport
-            .register_listener(&source_filter, None, invoked_once.clone())
+            .register_owned_listener(&source_filter, None, invoked_once.clone())
             .await
             .expect("failed to register listener");
 
         // the message is being processed by the registered listener
         transport.process_incoming_message(message_2).await;
+        let frames = invoked_once.frames.lock().await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].header().attributes().id(), &message_id_2);
+        assert_eq!(frames[0].payload_bytes(), b"some payload");
+        drop(frames);
 
         // [utest->dsn~utransport-unregisterlistener-stop-invoking-listeners~1]
         // after unregistering the listener again
         transport
-            .unregister_listener(&source_filter, None, invoked_once.clone())
+            .unregister_owned_listener(&source_filter, None, invoked_once.clone())
             .await
             .expect("failed to unregister listener");
-
-        // the ignored message listener should be invoked again
-        transport.process_incoming_message(message_3).await;
     }
 
     #[tokio::test]
@@ -821,7 +787,7 @@ mod tests {
         let topic_filter = "+/local_authority";
         let expected_topic_filter = topic_filter.to_string();
         let mut registered_listeners = RegisteredListeners::default();
-        let listener = Arc::new(MockUListener::new());
+        let listener = Arc::new(RecordingOwnedListener::default());
 
         assert!(registered_listeners
             .add_listener(topic_filter, listener.clone())
@@ -1055,7 +1021,7 @@ mod tests {
         // Create a mock message validator that returns an error (simulating invalid message)
         let mut mock_validator = MockMessageMapper::new();
         mock_validator
-            .expect_create_uattributes_from_mqtt_properties()
+            .expect_create_frame_header_from_mqtt_properties()
             .once()
             .returning(|_| {
                 Err(UStatus::fail_with_code(
