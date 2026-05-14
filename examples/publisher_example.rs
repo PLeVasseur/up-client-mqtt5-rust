@@ -17,7 +17,7 @@ use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
 use up_rust::{
-    UAttributes, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedTransport, UStatus,
+    UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport, UStatus,
     UUri, UUID,
 };
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
@@ -59,7 +59,7 @@ async fn main() -> Result<(), UStatus> {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let header = UFrameHeader::new(
+        let header = UFrameMetadata::new(
             UAttributes::new(
                 UUID::build(),
                 command.topic.clone(),

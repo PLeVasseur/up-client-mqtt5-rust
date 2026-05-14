@@ -35,7 +35,7 @@ impl UOwnedTransport for Mqtt5Transport {
     }
 
     async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
-        self.send_message(frame.header(), frame.payload().clone())
+        self.send_message(frame.metadata(), frame.payload().clone())
             .await
     }
 
@@ -79,7 +79,7 @@ mod tests {
     use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::RwLock;
     use up_rust::{
-        ProtobufWire, RawBytes, UAttributes, UDeserializer, UFrameHeader, UMessageType,
+        ProtobufWire, RawBytes, UAttributes, UDeserializer, UFrameMetadata, UMessageType,
         UOwnedFrame, UOwnedTransport, WireFormat, UUID,
     };
 
@@ -93,7 +93,7 @@ mod tests {
     fn frame(source: &str, payload: &[u8]) -> UOwnedFrame {
         let source = UUri::from_str(source).expect("Expected a valid source value");
         UOwnedFrame::new(
-            UFrameHeader::new(
+            UFrameMetadata::new(
                 UAttributes::new(UUID::build(), source, None, UMessageType::Publish),
                 RawBytes::encoding(),
             ),
@@ -117,7 +117,7 @@ mod tests {
 
         let mut message_mapper = MockMessageMapper::new();
         message_mapper
-            .expect_create_mqtt_properties_from_frame_header()
+            .expect_create_mqtt_properties_from_frame_metadata()
             .with(always())
             .once()
             .returning(|header| {
@@ -150,7 +150,7 @@ mod tests {
 
         let mut message_mapper = MockMessageMapper::new();
         message_mapper
-            .expect_create_mqtt_properties_from_frame_header()
+            .expect_create_mqtt_properties_from_frame_metadata()
             .once()
             .returning(|_| Ok(paho_mqtt::Properties::new()));
 
@@ -175,7 +175,7 @@ mod tests {
         let mut value = StringValue::new();
         value.value = "protobuf payload".to_string();
         let message_to_send = UOwnedFrame::from_serializable::<ProtobufWire, _>(
-            UFrameHeader::publish(source),
+            UFrameMetadata::publish(source),
             &value,
         )
         .unwrap();
@@ -195,7 +195,7 @@ mod tests {
 
         let mut message_mapper = MockMessageMapper::new();
         message_mapper
-            .expect_create_mqtt_properties_from_frame_header()
+            .expect_create_mqtt_properties_from_frame_metadata()
             .once()
             .returning(|header| {
                 assert_eq!(header.encoding(), &ProtobufWire::encoding());

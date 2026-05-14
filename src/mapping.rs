@@ -14,7 +14,7 @@
 use std::str::FromStr;
 
 use up_rust::{
-    UAttributes, UCode, UEncoding, UFrameHeader, UMessageType, UPriority, UStatus, UUri, UUID,
+    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUri, UUID,
 };
 
 const CURRENT_UPROTOCOL_MAJOR_VERSION: u8 = 1;
@@ -46,24 +46,24 @@ fn add_user_property(
 
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait MessageMapper: Send + Sync {
-    fn create_mqtt_properties_from_frame_header(
+    fn create_mqtt_properties_from_frame_metadata(
         &self,
-        header: &UFrameHeader,
+        header: &UFrameMetadata,
     ) -> Result<paho_mqtt::Properties, UStatus>;
 
-    fn create_frame_header_from_mqtt_properties(
+    fn create_frame_metadata_from_mqtt_properties(
         &self,
         props: &paho_mqtt::Properties,
-    ) -> Result<UFrameHeader, UStatus>;
+    ) -> Result<UFrameMetadata, UStatus>;
 }
 
 #[derive(Default)]
 pub(crate) struct DefaultMessageMapper;
 
 impl MessageMapper for DefaultMessageMapper {
-    fn create_mqtt_properties_from_frame_header(
+    fn create_mqtt_properties_from_frame_metadata(
         &self,
-        header: &UFrameHeader,
+        header: &UFrameMetadata,
     ) -> Result<paho_mqtt::Properties, UStatus> {
         validate_header(header)?;
 
@@ -205,10 +205,10 @@ impl MessageMapper for DefaultMessageMapper {
         Ok(properties)
     }
 
-    fn create_frame_header_from_mqtt_properties(
+    fn create_frame_metadata_from_mqtt_properties(
         &self,
         props: &paho_mqtt::Properties,
-    ) -> Result<UFrameHeader, UStatus> {
+    ) -> Result<UFrameMetadata, UStatus> {
         let uprotocol_major_version = required_user_property(props, KEY_UPROTOCOL_VERSION)?
             .parse::<u8>()
             .map_err(|err| {
@@ -326,7 +326,7 @@ impl MessageMapper for DefaultMessageMapper {
             .unwrap_or_else(|| content_type.clone());
         let schema_ref = props.find_user_property(KEY_ENCODING_SCHEMA_REF);
 
-        let header = UFrameHeader::new(
+        let header = UFrameMetadata::new(
             attributes,
             UEncoding::new(format_id, content_type, schema_ref),
         );
@@ -344,7 +344,7 @@ fn required_user_property(props: &paho_mqtt::Properties, key: &str) -> Result<St
     })
 }
 
-fn validate_header(header: &UFrameHeader) -> Result<(), UStatus> {
+fn validate_header(header: &UFrameMetadata) -> Result<(), UStatus> {
     UUri::check_validity(header.attributes().source()).map_err(|err| {
         UStatus::fail_with_code(
             UCode::INVALID_ARGUMENT,
@@ -435,7 +435,7 @@ mod tests {
             .with_token("token")
             .with_permission_level(7)
             .with_commstatus(UCode::UNAVAILABLE);
-        let header = UFrameHeader::new(
+        let header = UFrameMetadata::new(
             attributes,
             UEncoding::new(
                 "custom-json",
@@ -446,10 +446,10 @@ mod tests {
 
         let mapper = DefaultMessageMapper;
         let properties = mapper
-            .create_mqtt_properties_from_frame_header(&header)
+            .create_mqtt_properties_from_frame_metadata(&header)
             .unwrap();
         let mapped = mapper
-            .create_frame_header_from_mqtt_properties(&properties)
+            .create_frame_metadata_from_mqtt_properties(&properties)
             .unwrap();
 
         assert_eq!(&mapped, &header);
@@ -461,7 +461,7 @@ mod tests {
         let properties = paho_mqtt::Properties::new();
 
         let error = mapper
-            .create_frame_header_from_mqtt_properties(&properties)
+            .create_frame_metadata_from_mqtt_properties(&properties)
             .unwrap_err();
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);

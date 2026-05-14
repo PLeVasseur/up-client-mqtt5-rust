@@ -58,7 +58,7 @@ pub use mqtt_client::{MqttClientOptions, SslOptions};
 use paho_mqtt::{self as mqtt, Message, QOS_1};
 use tokio::{sync::RwLock, task::JoinHandle};
 use up_rust::{
-    ComparableOwnedListener, UCode, UFrameHeader, UOwnedFrame, UStatus, UUri, UUriError,
+    ComparableOwnedListener, UCode, UFrameMetadata, UOwnedFrame, UStatus, UUri, UUriError,
 };
 
 mod listener_registry;
@@ -238,15 +238,16 @@ async fn process_incoming_message(
     mqtt_message: paho_mqtt::Message,
 ) {
     // Extract a native uProtocol frame from the MQTT PUBLISH packet.
-    let frame =
-        match message_mapper.create_frame_header_from_mqtt_properties(mqtt_message.properties()) {
-            Ok(header) => UOwnedFrame::new(header, Bytes::copy_from_slice(mqtt_message.payload())),
-            Err(e) => {
-                // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
-                debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
-                return;
-            }
-        };
+    let frame = match message_mapper
+        .create_frame_metadata_from_mqtt_properties(mqtt_message.properties())
+    {
+        Ok(header) => UOwnedFrame::new(header, Bytes::copy_from_slice(mqtt_message.payload())),
+        Err(e) => {
+            // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
+            debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
+            return;
+        }
+    };
 
     // [impl->dsn~utransport-registerlistener-start-invoking-listeners~1]
     // [impl->dsn~utransport-unregisterlistener-stop-invoking-listeners~1]
@@ -521,11 +522,11 @@ impl Mqtt5Transport {
     ///
     /// Returns an error if the given attributes are invalid or the
     /// message cannot be sent to the MQTT broker.
-    async fn send_message(&self, header: &UFrameHeader, payload: Bytes) -> Result<(), UStatus> {
+    async fn send_message(&self, header: &UFrameMetadata, payload: Bytes) -> Result<(), UStatus> {
         // put metadata into MQTT 5 message properties
         let props = self
             .message_mapper
-            .create_mqtt_properties_from_frame_header(header)?;
+            .create_mqtt_properties_from_frame_metadata(header)?;
 
         // Get mqtt topic string from source and sink uuris
         let src_uri = header.attributes().source();
@@ -649,7 +650,7 @@ mod tests {
     use mqtt_client::MockMqttClientOperations;
     use tokio::sync::{Mutex, RwLock};
     use up_rust::{
-        UAttributes, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedListener,
+        UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
         UOwnedTransport, UUID,
     };
 
@@ -675,7 +676,7 @@ mod tests {
         source: &UUri,
         payload: &str,
     ) -> paho_mqtt::Message {
-        let header = UFrameHeader::new(
+        let header = UFrameMetadata::new(
             UAttributes::new(uuid.clone(), source.to_owned(), None, UMessageType::Publish),
             UEncoding::from_content_type("text/plain"),
         );
@@ -683,8 +684,8 @@ mod tests {
             .to_mqtt_topic(source, None, "test_authority")
             .expect("failed to create MQTT topic string");
         let props = message_mapper
-            .create_mqtt_properties_from_frame_header(&header)
-            .expect("invalid frame header");
+            .create_mqtt_properties_from_frame_metadata(&header)
+            .expect("invalid frame metadata");
         paho_mqtt::MessageBuilder::new()
             .topic(mqtt_topic)
             .payload(payload)
@@ -770,7 +771,7 @@ mod tests {
         transport.process_incoming_message(message_2).await;
         let frames = invoked_once.frames.lock().await;
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].header().attributes().id(), &message_id_2);
+        assert_eq!(frames[0].metadata().attributes().id(), &message_id_2);
         assert_eq!(frames[0].payload_bytes(), b"some payload");
         drop(frames);
 
@@ -1021,7 +1022,7 @@ mod tests {
         // Create a mock message validator that returns an error (simulating invalid message)
         let mut mock_validator = MockMessageMapper::new();
         mock_validator
-            .expect_create_frame_header_from_mqtt_properties()
+            .expect_create_frame_metadata_from_mqtt_properties()
             .once()
             .returning(|_| {
                 Err(UStatus::fail_with_code(

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use log::debug;
 use serial_test::serial;
 use up_rust::{
-    UAttributes, UCode, UEncoding, UFrameHeader, UMessageType, UOwnedFrame, UOwnedListener,
+    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
     UOwnedTransport, UUri, UUID,
 };
 
@@ -53,7 +53,7 @@ impl UOwnedListener for NotifyingListener {
 
 fn publish_frame(topic: UUri, payload: impl Into<Vec<u8>>) -> UOwnedFrame {
     UOwnedFrame::new(
-        UFrameHeader::new(
+        UFrameMetadata::new(
             UAttributes::new(UUID::build(), topic, None, UMessageType::Publish),
             UEncoding::from_content_type("text/plain"),
         ),
