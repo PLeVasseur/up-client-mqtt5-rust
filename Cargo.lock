@@ -2638,6 +2638,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "mediatype",
  "mockall 0.13.1",
  "protobuf",

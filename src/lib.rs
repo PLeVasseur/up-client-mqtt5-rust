@@ -344,8 +344,9 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// ### Supported Message Delivery Methods
 ///
-/// The transport supports the [push delivery method](https://github.com/eclipse-uprotocol/up-spec/blob/v1.6.0-alpha.7/up-l1/README.adoc#5-message-delivery) only.
-/// The owned receive function therefore always returns [UCode::UNIMPLEMENTED].
+/// The transport is natively push-oriented. The owned pull receive API is implemented by the
+/// `up-rust` default listener-backed adapter and is therefore subject to the same subscription
+/// semantics as [Self::register_owned_listener].
 ///
 /// ### Maximum number of listeners
 ///
@@ -648,7 +649,7 @@ mod tests {
 
     use async_trait::async_trait;
     use mqtt_client::MockMqttClientOperations;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{Mutex, Notify, RwLock};
     use up_rust::{
         UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
         UOwnedTransport, UUID,
@@ -781,6 +782,55 @@ mod tests {
             .unregister_owned_listener(&source_filter, None, invoked_once.clone())
             .await
             .expect("failed to unregister listener");
+    }
+
+    #[tokio::test]
+    async fn test_receive_owned_uses_listener_backed_default() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+        let message_mapper = mapping::DefaultMessageMapper;
+        let message_id = UUID::build();
+        let message =
+            create_mqtt_publish_message(&message_mapper, &message_id, &source, "some payload");
+        let subscribed = Arc::new(Notify::new());
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().once().return_once({
+            let subscribed = subscribed.clone();
+            move |_topic_filter, _subscription_id| {
+                subscribed.notify_one();
+                Ok(())
+            }
+        });
+        client_operations
+            .expect_unsubscribe()
+            .once()
+            .return_const(Ok(()));
+
+        let transport = Arc::new(Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        });
+
+        let receive_task = tokio::spawn({
+            let transport = transport.clone();
+            let source_filter = source_filter.clone();
+            async move { transport.receive_owned(&source_filter, None).await }
+        });
+        subscribed.notified().await;
+        transport.process_incoming_message(message).await;
+
+        let received = receive_task
+            .await
+            .expect("receive task should complete")
+            .expect("receive_owned should return a frame");
+        assert_eq!(received.metadata().attributes().id(), &message_id);
+        assert_eq!(received.payload_bytes(), b"some payload");
     }
 
     #[tokio::test]

@@ -22,18 +22,6 @@ use crate::Mqtt5Transport;
 
 #[async_trait]
 impl UOwnedTransport for Mqtt5Transport {
-    async fn receive_owned(
-        &self,
-        _source_filter: &UUri,
-        _sink_filter: Option<&UUri>,
-    ) -> Result<UOwnedFrame, UStatus> {
-        // [impl->dsn~utransport-receive-error-unimplemented~1]
-        Err(UStatus::fail_with_code(
-            UCode::UNIMPLEMENTED,
-            "not implemented",
-        ))
-    }
-
     async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
         self.send_message(frame.metadata(), frame.payload().clone())
             .await
