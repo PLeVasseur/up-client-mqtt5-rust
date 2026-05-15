@@ -61,7 +61,7 @@ async fn main() -> Result<(), UStatus> {
     env_logger::init();
 
     let command = Command::parse();
-    let authority = command.topic_filter.authority_name.clone();
+    let authority = command.topic_filter.authority_name();
     let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
     (|| {
