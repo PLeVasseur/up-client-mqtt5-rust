@@ -649,7 +649,7 @@ mod tests {
 
     use async_trait::async_trait;
     use mqtt_client::MockMqttClientOperations;
-    use tokio::sync::{Mutex, Notify, RwLock};
+    use tokio::sync::{Mutex, RwLock};
     use up_rust::{
         UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
         UOwnedTransport, UUID,
@@ -785,28 +785,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_receive_owned_uses_listener_backed_default() {
+    async fn test_receive_owned_defaults_to_unimplemented() {
         let source_filter =
             UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
-        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
-        let message_mapper = mapping::DefaultMessageMapper;
-        let message_id = UUID::build();
-        let message =
-            create_mqtt_publish_message(&message_mapper, &message_id, &source, "some payload");
-        let subscribed = Arc::new(Notify::new());
 
         let mut client_operations = MockMqttClientOperations::new();
-        client_operations.expect_subscribe().once().return_once({
-            let subscribed = subscribed.clone();
-            move |_topic_filter, _subscription_id| {
-                subscribed.notify_one();
-                Ok(())
-            }
-        });
-        client_operations
-            .expect_unsubscribe()
-            .once()
-            .return_const(Ok(()));
+        client_operations.expect_subscribe().never();
+        client_operations.expect_unsubscribe().never();
 
         let transport = Arc::new(Mqtt5Transport {
             mqtt_client: Arc::new(client_operations),
@@ -817,20 +802,10 @@ mod tests {
             message_callback_handle: None,
         });
 
-        let receive_task = tokio::spawn({
-            let transport = transport.clone();
-            let source_filter = source_filter.clone();
-            async move { transport.receive_owned(&source_filter, None).await }
-        });
-        subscribed.notified().await;
-        transport.process_incoming_message(message).await;
-
-        let received = receive_task
+        assert!(transport
+            .receive_owned(&source_filter, None)
             .await
-            .expect("receive task should complete")
-            .expect("receive_owned should return a frame");
-        assert_eq!(received.metadata().attributes().id(), &message_id);
-        assert_eq!(received.payload_bytes(), b"some payload");
+            .is_err_and(|status| status.get_code() == UCode::UNIMPLEMENTED));
     }
 
     #[tokio::test]
