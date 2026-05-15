@@ -292,7 +292,7 @@ impl MessageMapper for DefaultMessageMapper {
                     format!("Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: {err}"),
                 )
             })?;
-            attributes = attributes.with_commstatus(UCode::from_u8(value).ok_or_else(|| {
+            attributes = attributes.with_comm_status(UCode::from_u8(value).ok_or_else(|| {
                 UStatus::fail_with_code(
                     UCode::INVALID_ARGUMENT,
                     format!("Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: not a valid UCode [{value}]"),
@@ -434,7 +434,7 @@ mod tests {
             .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
             .with_token("token")
             .with_permission_level(7)
-            .with_commstatus(UCode::UNAVAILABLE);
+            .with_comm_status(UCode::UNAVAILABLE);
         let header = UFrameMetadata::new(
             attributes,
             UEncoding::new(
