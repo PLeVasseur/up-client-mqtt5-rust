@@ -14,6 +14,8 @@ up-transport-mqtt5 = { version = "0.4" }
 
 Please refer to [the crate's Rust Docs](https://docs.rs/up-transport-mqtt5/) and the [examples](./examples/) folder to see how to configure and use the transport.
 
+This branch uses the native-frame `up-rust` transport API. `Mqtt5Transport` implements `UOwnedTransport`: it sends `UOwnedFrame` values and reconstructs native `UFrameMetadata` on receive. `UEncoding.content_type` maps to the MQTT 5 Content Type property, while `UEncoding.format_id` and `UEncoding.schema_ref` are preserved as user properties when present. The transport is owned-buffer only; MQTT broker delivery does not provide true zero-copy transmit loans or receive leases.
+
 ## Building from Source
 
 ### Clone the Repository
