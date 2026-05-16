@@ -176,30 +176,32 @@ impl MessageMapper for DefaultMessageMapper {
             )?;
         }
 
-        properties
-            .push_string(
-                paho_mqtt::PropertyCode::ContentType,
-                header.encoding().content_type(),
-            )
-            .map_err(|e| {
-                UStatus::fail_with_code(
-                    UCode::INTERNAL,
-                    format!("Failed to create Content Type property: {e:?}"),
+        if let Some(encoding) = header.encoding() {
+            properties
+                .push_string(
+                    paho_mqtt::PropertyCode::ContentType,
+                    encoding.content_type(),
                 )
-            })?;
-        add_user_property(
-            &mut properties,
-            KEY_ENCODING_FORMAT_ID,
-            header.encoding().format_id(),
-            "Failed to add payload format ID to MQTT User Properties",
-        )?;
-        if let Some(schema_ref) = header.encoding().schema_ref() {
+                .map_err(|e| {
+                    UStatus::fail_with_code(
+                        UCode::INTERNAL,
+                        format!("Failed to create Content Type property: {e:?}"),
+                    )
+                })?;
             add_user_property(
                 &mut properties,
-                KEY_ENCODING_SCHEMA_REF,
-                schema_ref,
-                "Failed to add payload schema reference to MQTT User Properties",
+                KEY_ENCODING_FORMAT_ID,
+                encoding.format_id(),
+                "Failed to add payload format ID to MQTT User Properties",
             )?;
+            if let Some(schema_ref) = encoding.schema_ref() {
+                add_user_property(
+                    &mut properties,
+                    KEY_ENCODING_SCHEMA_REF,
+                    schema_ref,
+                    "Failed to add payload schema reference to MQTT User Properties",
+                )?;
+            }
         }
 
         Ok(properties)
@@ -318,18 +320,26 @@ impl MessageMapper for DefaultMessageMapper {
             ));
         }
 
-        let content_type = props
-            .get_string(paho_mqtt::PropertyCode::ContentType)
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        let format_id = props
-            .find_user_property(KEY_ENCODING_FORMAT_ID)
-            .unwrap_or_else(|| content_type.clone());
+        let content_type = props.get_string(paho_mqtt::PropertyCode::ContentType);
+        let format_id = props.find_user_property(KEY_ENCODING_FORMAT_ID);
         let schema_ref = props.find_user_property(KEY_ENCODING_SCHEMA_REF);
+        let encoding = if content_type.is_some() || format_id.is_some() || schema_ref.is_some() {
+            let content_type =
+                content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+            let format_id = format_id.unwrap_or_else(|| content_type.clone());
+            Some(
+                UEncoding::try_new(format_id, content_type, schema_ref).map_err(|err| {
+                    UStatus::fail_with_code(
+                        UCode::INVALID_ARGUMENT,
+                        format!("Failed to map MQTT payload encoding metadata: {err}"),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
 
-        let header = UFrameMetadata::new(
-            attributes,
-            UEncoding::new(format_id, content_type, schema_ref),
-        );
+        let header = UFrameMetadata::new(attributes, encoding);
         validate_header(&header)?;
         Ok(header)
     }

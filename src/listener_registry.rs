@@ -18,7 +18,7 @@ use std::{
 
 use log::debug;
 use slab::Slab;
-use up_rust::{ComparableOwnedListener, UCode, UStatus};
+use up_rust::{transport::ComparableOwnedListener, UCode, UStatus};
 
 pub(crate) type SubscriptionIdentifier = u16;
 type ListenerSet = HashSet<ComparableOwnedListener>;

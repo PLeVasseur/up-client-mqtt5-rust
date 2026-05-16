@@ -58,7 +58,8 @@ pub use mqtt_client::{MqttClientOptions, SslOptions};
 use paho_mqtt::{self as mqtt, Message, QOS_1};
 use tokio::{sync::RwLock, task::JoinHandle};
 use up_rust::{
-    ComparableOwnedListener, UCode, UFrameMetadata, UOwnedFrame, UStatus, UUri, UUriError,
+    transport::ComparableOwnedListener, validate_owned_frame_for_transport, UCode, UFrameMetadata,
+    UOwnedFrame, UStatus, UUri, UUriError,
 };
 
 mod listener_registry;
@@ -241,7 +242,22 @@ async fn process_incoming_message(
     let frame = match message_mapper
         .create_frame_metadata_from_mqtt_properties(mqtt_message.properties())
     {
-        Ok(header) => UOwnedFrame::new(header, Bytes::copy_from_slice(mqtt_message.payload())),
+        Ok(header) => {
+            let payload = mqtt_message.payload();
+            let frame = if header.encoding().is_some() {
+                UOwnedFrame::new(header, Bytes::copy_from_slice(payload))
+            } else if payload.is_empty() {
+                UOwnedFrame::without_payload(header)
+            } else {
+                debug!("MQTT PUBLISH packet contains payload but no payload encoding");
+                return;
+            };
+            if let Err(e) = validate_owned_frame_for_transport(&frame) {
+                debug!("Failed to validate MQTT PUBLISH packet as uProtocol frame: {e}");
+                return;
+            }
+            frame
+        }
         Err(e) => {
             // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
             debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
@@ -523,7 +539,11 @@ impl Mqtt5Transport {
     ///
     /// Returns an error if the given attributes are invalid or the
     /// message cannot be sent to the MQTT broker.
-    async fn send_message(&self, header: &UFrameMetadata, payload: Bytes) -> Result<(), UStatus> {
+    async fn send_message(
+        &self,
+        header: &UFrameMetadata,
+        payload: Option<Bytes>,
+    ) -> Result<(), UStatus> {
         // put metadata into MQTT 5 message properties
         let props = self
             .message_mapper
@@ -543,9 +563,11 @@ impl Mqtt5Transport {
             // QoS 1 makes sure that we notice if the transfer to the MQTT broker fails
             .qos(QOS_1);
 
-        // If there is payload to send, add it to the message unaltered.
-        // [impl->dsn~up-transport-mqtt5-payload-mapping~1]
-        msg_builder = msg_builder.payload(payload);
+        if let Some(payload) = payload {
+            // If there is payload to send, add it to the message unaltered.
+            // [impl->dsn~up-transport-mqtt5-payload-mapping~1]
+            msg_builder = msg_builder.payload(payload);
+        }
         let msg = msg_builder.finalize();
 
         self.mqtt_client

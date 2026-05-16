@@ -16,14 +16,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use up_rust::{UCode, UOwnedFrame, UOwnedListener, UOwnedTransport, UStatus, UUri};
+use up_rust::{
+    transport::verify_filter_criteria, validate_owned_frame_for_transport, UCode, UOwnedFrame,
+    UOwnedListener, UOwnedTransport, UStatus, UUri,
+};
 
 use crate::Mqtt5Transport;
 
 #[async_trait]
 impl UOwnedTransport for Mqtt5Transport {
     async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
-        self.send_message(frame.metadata(), frame.payload().clone())
+        validate_owned_frame_for_transport(&frame)?;
+        self.send_message(frame.metadata(), frame.payload().cloned())
             .await
     }
 
@@ -34,7 +38,7 @@ impl UOwnedTransport for Mqtt5Transport {
         listener: Arc<dyn UOwnedListener>,
     ) -> Result<(), UStatus> {
         // [impl->dsn~utransport-registerlistener-error-invalid-parameter~1]
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        verify_filter_criteria(source_filter, sink_filter)?;
         let topic = self
             .to_mqtt_topic_string(source_filter, sink_filter)
             .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
@@ -49,7 +53,7 @@ impl UOwnedTransport for Mqtt5Transport {
         listener: Arc<dyn UOwnedListener>,
     ) -> Result<(), UStatus> {
         // [impl->dsn~utransport-unregisterlistener-error-invalid-parameter~1]
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        verify_filter_criteria(source_filter, sink_filter)?;
         let topic = self
             .to_mqtt_topic_string(source_filter, sink_filter)
             .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
@@ -67,8 +71,9 @@ mod tests {
     use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::RwLock;
     use up_rust::{
-        ProtobufWire, RawBytes, UAttributes, UDeserializer, UFrameMetadata, UMessageType,
-        UOwnedFrame, UOwnedTransport, WireFormat, UUID,
+        wire::{RawBytes, UDeserializer, WireFormat},
+        ProtobufWire, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
+        UUID,
     };
 
     use crate::{
@@ -109,7 +114,7 @@ mod tests {
             .with(always())
             .once()
             .returning(|header| {
-                assert_eq!(header.encoding(), &RawBytes::encoding());
+                assert_eq!(header.encoding(), Some(&RawBytes::encoding()));
                 Ok(paho_mqtt::Properties::new())
             });
 
@@ -186,7 +191,7 @@ mod tests {
             .expect_create_mqtt_properties_from_frame_metadata()
             .once()
             .returning(|header| {
-                assert_eq!(header.encoding(), &ProtobufWire::encoding());
+                assert_eq!(header.encoding(), Some(&ProtobufWire::encoding()));
                 Ok(paho_mqtt::Properties::new())
             });
 
