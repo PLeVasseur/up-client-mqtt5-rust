@@ -466,4 +466,60 @@ mod tests {
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
     }
+
+    #[test]
+    fn rejects_expired_native_metadata() {
+        let expired_id = UUID::from_u64_pair(0x018D_548E_A8E0_7000, 0x8000_0000_0000_0000)
+            .expect("valid expired UUID");
+        let mut properties = paho_mqtt::Properties::new();
+        add_user_property(
+            &mut properties,
+            KEY_UPROTOCOL_VERSION,
+            "1",
+            "failed to add version",
+        )
+        .unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_MESSAGE_ID,
+            &expired_id.to_hyphenated_string(),
+            "failed to add id",
+        )
+        .unwrap();
+        add_user_property(&mut properties, KEY_TYPE, "publish", "failed to add type").unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_SOURCE,
+            "//vin.vehicles/A8000/2/8A50",
+            "failed to add source",
+        )
+        .unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_PRIORITY,
+            "CS1",
+            "failed to add priority",
+        )
+        .unwrap();
+        add_user_property(&mut properties, KEY_TTL, "1", "failed to add ttl").unwrap();
+        properties
+            .push_string(
+                paho_mqtt::PropertyCode::ContentType,
+                "application/octet-stream",
+            )
+            .unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_ENCODING_FORMAT_ID,
+            "raw-bytes",
+            "failed to add encoding format",
+        )
+        .unwrap();
+
+        let error = DefaultMessageMapper
+            .create_frame_metadata_from_mqtt_properties(&properties)
+            .unwrap_err();
+
+        assert_eq!(error.get_code(), UCode::DEADLINE_EXCEEDED);
+    }
 }

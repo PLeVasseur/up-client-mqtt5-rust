@@ -2759,8 +2759,6 @@ dependencies = [
  "protoc-bin-vendored",
  "rand",
  "regex",
- "serde",
- "serde_json",
  "tracing",
  "uriparse",
  "uuid-simd",

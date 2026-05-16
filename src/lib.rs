@@ -344,9 +344,9 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// ### Supported Message Delivery Methods
 ///
-/// The transport is natively push-oriented. The owned pull receive API is implemented by the
-/// `up-rust` default listener-backed adapter and is therefore subject to the same subscription
-/// semantics as [Self::register_owned_listener].
+/// The transport is natively push-oriented. The owned pull receive API is not implemented and
+/// returns `UCode::UNIMPLEMENTED`; applications should use [Self::register_owned_listener] for
+/// push delivery.
 ///
 /// ### Maximum number of listeners
 ///
