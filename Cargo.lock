@@ -2751,7 +2751,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=988895bc855398e81a27d1529e3775120d837e97#988895bc855398e81a27d1529e3775120d837e97"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=922a0afcb02a368b05b2a70d92c62049dab52be6#922a0afcb02a368b05b2a70d92c62049dab52be6"
 dependencies = [
  "async-trait",
  "base64",

@@ -71,8 +71,8 @@ mod tests {
     use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::RwLock;
     use up_rust::{
-        wire::{RawBytes, UDeserializer, WireFormat},
-        ProtobufWire, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
+        payload::{RawBytes, UDeserializer, UWireError},
+        ProtobufPayload, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
         UUID,
     };
 
@@ -167,7 +167,7 @@ mod tests {
         let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").unwrap();
         let mut value = StringValue::new();
         value.value = "protobuf payload".to_string();
-        let message_to_send = UOwnedFrame::from_serializable::<ProtobufWire, _>(
+        let message_to_send = UOwnedFrame::from_serializable::<ProtobufPayload, _>(
             UFrameMetadata::publish(source),
             &value,
         )
@@ -178,7 +178,7 @@ mod tests {
             .expect_publish()
             .once()
             .return_once(|mqtt_message| {
-                let decoded = <StringValue as UDeserializer<ProtobufWire>>::deserialize_from(
+                let decoded = <StringValue as UDeserializer<ProtobufPayload>>::deserialize_from(
                     mqtt_message.payload(),
                 )
                 .unwrap();
@@ -191,7 +191,48 @@ mod tests {
             .expect_create_mqtt_properties_from_frame_metadata()
             .once()
             .returning(|header| {
-                assert_eq!(header.encoding(), Some(&ProtobufWire::encoding()));
+                assert_eq!(header.encoding(), Some(&ProtobufPayload::encoding()));
+                Ok(paho_mqtt::Properties::new())
+            });
+
+        let mqtt_transport = Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(message_mapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        };
+
+        mqtt_transport.send_owned(message_to_send).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_owned_keeps_raw_payload_incompatible_with_protobuf_payload_codec() {
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").unwrap();
+        let message_to_send = UOwnedFrame::new(
+            UFrameMetadata::publish(source).with_encoding(RawBytes::encoding()),
+            [0x0a_u8].as_slice(),
+        );
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations
+            .expect_publish()
+            .once()
+            .return_once(|mqtt_message| {
+                let result = <StringValue as UDeserializer<ProtobufPayload>>::deserialize_from(
+                    mqtt_message.payload(),
+                );
+                assert!(matches!(result, Err(UWireError::InvalidPayload(_))));
+                Ok(())
+            });
+
+        let mut message_mapper = MockMessageMapper::new();
+        message_mapper
+            .expect_create_mqtt_properties_from_frame_metadata()
+            .once()
+            .returning(|header| {
+                assert_eq!(header.encoding(), Some(&RawBytes::encoding()));
                 Ok(paho_mqtt::Properties::new())
             });
 
