@@ -15,7 +15,16 @@
 This crate provides an implementation of the [uProtocol MQTT 5 Transport v1.6.0-alpha.7](https://github.com/eclipse-uprotocol/up-spec/blob/v1.6.0-alpha.7/up-l1/mqtt_5.adoc).
 
 The transport requires an MQTT 5 broker to connect to and uses MQTT 5 `PUBLISH`
-packets to transfer uProtocol messages between uEntities.
+packets to transfer native uProtocol frames between uEntities. It implements
+[`up_rust::UOwnedTransport`]; MQTT broker delivery does not provide true
+zero-copy transmit loans or receive leases, so this crate intentionally does not
+implement [`up_rust::zero_copy::UZeroCopyTransport`].
+
+Frame metadata is projected into MQTT 5 properties. Application payload bytes are
+published as the MQTT packet payload exactly as produced by the selected
+serializer. `UEncoding.content_type` maps to the MQTT 5 Content Type property;
+`UEncoding.format_id` and non-empty `UEncoding.schema_ref` are preserved as user
+properties for typed decoder compatibility on receive.
 
 It supports both _in-vehicle_ and _off-vehicle_ communication modes, which
 are determined by the [TransportMode] enum set in the [Mqtt5TransportOptions]
@@ -43,6 +52,8 @@ Please refer to the [examples](https://github.com/eclipse-uprotocol/up-transport
 
 [tokio `Runtime`]: https://docs.rs/tokio/latest/tokio/runtime/index.html
 */
+
+#![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -96,6 +107,7 @@ pub struct Mqtt5TransportOptions {
     #[cfg_attr(feature = "cli", arg(value_enum, long = PARAM_MODE, value_name = "MODE", env = "MQTT_TRANSPORT_MODE", default_value_t = TransportMode::InVehicle))]
     pub mode: TransportMode,
 
+    /// MQTT client connection options such as broker URI, credentials, and TLS.
     #[cfg_attr(feature = "cli", command(flatten))]
     pub mqtt_client_options: MqttClientOptions,
 }
@@ -355,13 +367,13 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// ### Supported Message Priority Levels
 ///
-/// The [Self::send_owned] function always uses a standard MQTT 5 PUBLISH packet to transfer the message
+/// The [`up_rust::UOwnedTransport::send_owned`] implementation always uses a standard MQTT 5 PUBLISH packet to transfer the message
 /// to the MQTT broker regardless of the service class (priority) set on a uProtocol message.
 ///
 /// ### Supported Message Delivery Methods
 ///
 /// The transport is natively push-oriented. The owned pull receive API is not implemented and
-/// returns `UCode::UNIMPLEMENTED`; applications should use [Self::register_owned_listener] for
+/// returns `UCode::UNIMPLEMENTED`; applications should use [`up_rust::UOwnedTransport::register_owned_listener`] for
 /// push delivery.
 ///
 /// ### Maximum number of listeners
