@@ -22,7 +22,7 @@ name = "up-transport-mqtt5"
 readme = "README.md"
 repository = "https://github.com/eclipse-uprotocol/up-transport-mqtt5-rust"
 rust-version = "1.88"
-version = "0.4.0"
+version = "0.5.0"
 
 [features]
 default = ["cli"]
@@ -48,7 +48,7 @@ log = { version = "0.4" }
 paho-mqtt = { version = "0.14.0", features = ["vendored-ssl"] }
 slab = { version = "0.4.11" }
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "46afb8551077d65df66de29059629332a6fdd501", default-features = false }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "0b0201a8fa7a30c98c78c41221a4fac9eac954d8", default-features = false }
 
 [build-dependencies]
 testcontainers = { version = "0.27.2", default-features = false, features = ["blocking"] }
@@ -71,7 +71,7 @@ tokio = { version = "1.45.1", default-features = false, features = [
     "signal",
     "sync",
 ] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "46afb8551077d65df66de29059629332a6fdd501", default-features = false, features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "0b0201a8fa7a30c98c78c41221a4fac9eac954d8", default-features = false, features = ["protobuf-wire", "test-util"] }
 
 [[example]]
 name = "publisher_example"
