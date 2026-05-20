@@ -83,6 +83,7 @@ required-features = ["cli"]
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [package.metadata.cargo-all-features]
 # optional dependencies are activated by means of features only
@@ -94,7 +95,7 @@ max_combination_size = 3
 # platform and adds the 'docker_available' cfg flag accordingly.
 # Tests using #[cfg(docker_available)] will then only be compiled (and run)
 # if Docker is actually available on the platform.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docker_available)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docker_available)', 'cfg(docsrs)'] }
 
 [lints.clippy]
 ignored_unit_patterns = "warn"

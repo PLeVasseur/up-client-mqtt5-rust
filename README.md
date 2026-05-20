@@ -14,7 +14,34 @@ up-transport-mqtt5 = { version = "0.4" }
 
 Please refer to [the crate's Rust Docs](https://docs.rs/up-transport-mqtt5/) and the [examples](./examples/) folder to see how to configure and use the transport.
 
-This branch uses the native-frame `up-rust` transport API. `Mqtt5Transport` implements `UOwnedTransport`: it sends `UOwnedFrame` values and reconstructs native `UFrameMetadata` on receive. `UEncoding.content_type` maps to the MQTT 5 Content Type property, while `UEncoding.format_id` and `UEncoding.schema_ref` are preserved as user properties when present. The transport is owned-buffer only; MQTT broker delivery does not provide true zero-copy transmit loans or receive leases.
+This crate uses the native-frame `up-rust` transport API. `Mqtt5Transport` implements `UOwnedTransport`: it sends `UOwnedFrame` values and reconstructs native `UFrameMetadata` on receive. The transport is owned-buffer only; MQTT broker delivery does not provide true zero-copy transmit loans or receive leases.
+
+| uProtocol frame part | MQTT 5 representation |
+| --- | --- |
+| `UAttributes.source` / `sink` | MQTT topic and user properties |
+| `UAttributes` optional fields | MQTT user properties |
+| `UEncoding.content_type` | MQTT Content Type property |
+| `UEncoding.format_id` | MQTT user property |
+| `UEncoding.schema_ref` | MQTT user property when present |
+| Application payload bytes | MQTT PUBLISH payload |
+
+Payload codecs are selected by the application, not by the MQTT transport. For example, an already-encoded raw payload can be sent through the owned helper:
+
+```rust
+use up_rust::{payload::RawBytes, transport::UOwnedTransportExt, UFrameMetadata};
+
+async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
+where
+    T: up_rust::UOwnedTransport,
+{
+let payload: &[u8] = b"payload";
+transport
+    .send_serialized::<RawBytes, _>(metadata, &payload)
+    .await
+}
+```
+
+On receive, typed decoders should use `UOwnedFrame::deserialize::<Codec, T>()`; the frame's reconstructed `UEncoding` is checked before payload bytes are handed to the decoder.
 
 ## Building from Source
 

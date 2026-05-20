@@ -54,6 +54,7 @@ Please refer to the [examples](https://github.com/eclipse-uprotocol/up-transport
 */
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::HashSet;
 use std::sync::Arc;
