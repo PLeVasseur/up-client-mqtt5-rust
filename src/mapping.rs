@@ -14,7 +14,8 @@
 use std::str::FromStr;
 
 use up_rust::{
-    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUri, UUID,
+    PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
+    UStatus, UUri, UUID,
 };
 
 const CURRENT_UPROTOCOL_MAJOR_VERSION: u8 = 1;
@@ -30,8 +31,8 @@ const KEY_PERMISSION_LEVEL: &str = "7";
 const KEY_COMMSTATUS: &str = "8";
 const KEY_TOKEN: &str = "10";
 const KEY_TRACEPARENT: &str = "11";
-const KEY_ENCODING_FORMAT_ID: &str = "uformatid";
-const KEY_ENCODING_SCHEMA_REF: &str = "uschemaref";
+const KEY_PAYLOAD_FORMAT: &str = "12";
+const KEY_CUSTOM_ENCODING_ID: &str = "uencodingid";
 
 fn add_user_property(
     properties: &mut paho_mqtt::Properties,
@@ -177,30 +178,33 @@ impl MessageMapper for DefaultMessageMapper {
         }
 
         if let Some(encoding) = header.encoding() {
-            properties
-                .push_string(
-                    paho_mqtt::PropertyCode::ContentType,
-                    encoding.content_type(),
-                )
-                .map_err(|e| {
-                    UStatus::fail_with_code(
-                        UCode::INTERNAL,
-                        format!("Failed to create Content Type property: {e:?}"),
-                    )
-                })?;
-            add_user_property(
-                &mut properties,
-                KEY_ENCODING_FORMAT_ID,
-                encoding.format_id(),
-                "Failed to add payload format ID to MQTT User Properties",
-            )?;
-            if let Some(schema_ref) = encoding.schema_ref() {
-                add_user_property(
-                    &mut properties,
-                    KEY_ENCODING_SCHEMA_REF,
-                    schema_ref,
-                    "Failed to add payload schema reference to MQTT User Properties",
-                )?;
+            if let Some(content_type) = encoding.content_type() {
+                properties
+                    .push_string(paho_mqtt::PropertyCode::ContentType, content_type)
+                    .map_err(|e| {
+                        UStatus::fail_with_code(
+                            UCode::INTERNAL,
+                            format!("Failed to create Content Type property: {e:?}"),
+                        )
+                    })?;
+            }
+            match encoding {
+                PayloadEncoding::Standard(format) => {
+                    add_user_property(
+                        &mut properties,
+                        KEY_PAYLOAD_FORMAT,
+                        &format.value().to_string(),
+                        "Failed to add payload format to MQTT User Properties",
+                    )?;
+                }
+                PayloadEncoding::Custom(custom) => {
+                    add_user_property(
+                        &mut properties,
+                        KEY_CUSTOM_ENCODING_ID,
+                        custom.id(),
+                        "Failed to add custom payload encoding ID to MQTT User Properties",
+                    )?;
+                }
             }
         }
 
@@ -321,22 +325,48 @@ impl MessageMapper for DefaultMessageMapper {
         }
 
         let content_type = props.get_string(paho_mqtt::PropertyCode::ContentType);
-        let format_id = props.find_user_property(KEY_ENCODING_FORMAT_ID);
-        let schema_ref = props.find_user_property(KEY_ENCODING_SCHEMA_REF);
-        let encoding = if content_type.is_some() || format_id.is_some() || schema_ref.is_some() {
-            let content_type =
-                content_type.unwrap_or_else(|| "application/octet-stream".to_string());
-            let format_id = format_id.unwrap_or_else(|| content_type.clone());
-            Some(
-                UEncoding::try_new(format_id, content_type, schema_ref).map_err(|err| {
+        let payload_format = props.find_user_property(KEY_PAYLOAD_FORMAT);
+        let custom_encoding_id = props.find_user_property(KEY_CUSTOM_ENCODING_ID);
+        let encoding = match (payload_format, custom_encoding_id, content_type) {
+            (Some(payload_format), None, _) => {
+                let value = payload_format.parse::<u8>().map_err(|err| {
                     UStatus::fail_with_code(
                         UCode::INVALID_ARGUMENT,
-                        format!("Failed to map MQTT payload encoding metadata: {err}"),
+                        format!("Failed to map MQTT payload format metadata: {err}"),
+                    )
+                })?;
+                let format = UPayloadFormat::from_u8(value).ok_or_else(|| {
+                    UStatus::fail_with_code(
+                        UCode::INVALID_ARGUMENT,
+                        format!("MQTT message contains unsupported payload format {value}"),
+                    )
+                })?;
+                Some(PayloadEncoding::standard(format))
+            }
+            (None, Some(custom_encoding_id), Some(content_type)) => Some(
+                PayloadEncoding::try_custom(custom_encoding_id, content_type).map_err(|err| {
+                    UStatus::fail_with_code(
+                        UCode::INVALID_ARGUMENT,
+                        format!("Failed to map MQTT custom payload encoding metadata: {err}"),
                     )
                 })?,
-            )
-        } else {
-            None
+            ),
+            (None, None, Some(content_type)) => {
+                Some(PayloadEncoding::from_content_type(content_type))
+            }
+            (None, None, None) => None,
+            (Some(_), Some(_), _) => {
+                return Err(UStatus::fail_with_code(
+                    UCode::INVALID_ARGUMENT,
+                    "MQTT message contains both standard and custom payload encoding metadata",
+                ))
+            }
+            (None, Some(_), None) => {
+                return Err(UStatus::fail_with_code(
+                    UCode::INVALID_ARGUMENT,
+                    "MQTT custom payload encoding metadata requires Content Type",
+                ))
+            }
         };
 
         let header = UFrameMetadata::new(attributes, encoding);
@@ -447,11 +477,7 @@ mod tests {
             .with_comm_status(UCode::UNAVAILABLE);
         let header = UFrameMetadata::new(
             attributes,
-            UEncoding::new(
-                "custom-json",
-                "application/custom+json",
-                Some("schema://example/type"),
-            ),
+            PayloadEncoding::custom("custom-json", "application/custom+json"),
         );
 
         let mapper = DefaultMessageMapper;
@@ -520,9 +546,9 @@ mod tests {
             .unwrap();
         add_user_property(
             &mut properties,
-            KEY_ENCODING_FORMAT_ID,
-            "raw-bytes",
-            "failed to add encoding format",
+            KEY_PAYLOAD_FORMAT,
+            &UPayloadFormat::Raw.value().to_string(),
+            "failed to add payload format",
         )
         .unwrap();
 

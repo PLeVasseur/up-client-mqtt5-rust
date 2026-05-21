@@ -17,8 +17,8 @@ use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
 use up_rust::{
-    UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport, UStatus,
-    UUri, UUID,
+    PayloadEncoding, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
+    UStatus, UUri, UUID,
 };
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
@@ -67,7 +67,7 @@ async fn main() -> Result<(), UStatus> {
                 UMessageType::Publish,
             )
             .with_ttl(1000),
-            UEncoding::from_content_type("text/plain"),
+            PayloadEncoding::from_content_type("text/plain"),
         );
         let message = UOwnedFrame::new(header, current_time.to_string().into_bytes());
 

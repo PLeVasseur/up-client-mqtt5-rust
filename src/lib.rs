@@ -22,9 +22,9 @@ implement [`up_rust::zero_copy::UZeroCopyTransport`].
 
 Frame metadata is projected into MQTT 5 properties. Application payload bytes are
 published as the MQTT packet payload exactly as produced by the selected
-serializer. `UEncoding.content_type` maps to the MQTT 5 Content Type property;
-`UEncoding.format_id` and non-empty `UEncoding.schema_ref` are preserved as user
-properties for typed decoder compatibility on receive.
+serializer. Standard payload formats are preserved as the upstream payload-format
+number, while native-only custom payload encodings preserve a custom encoding ID
+plus MQTT 5 Content Type for typed decoder compatibility on receive.
 
 It supports both _in-vehicle_ and _off-vehicle_ communication modes, which
 are determined by the [TransportMode] enum set in the [Mqtt5TransportOptions]
@@ -686,7 +686,7 @@ mod tests {
     use mqtt_client::MockMqttClientOperations;
     use tokio::sync::{Mutex, RwLock};
     use up_rust::{
-        UAttributes, UEncoding, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
+        PayloadEncoding, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
         UOwnedTransport, UUID,
     };
 
@@ -714,7 +714,7 @@ mod tests {
     ) -> paho_mqtt::Message {
         let header = UFrameMetadata::new(
             UAttributes::new(uuid.clone(), source.to_owned(), None, UMessageType::Publish),
-            UEncoding::from_content_type("text/plain"),
+            PayloadEncoding::from_content_type("text/plain"),
         );
         let mqtt_topic = TransportMode::InVehicle
             .to_mqtt_topic(source, None, "test_authority")

@@ -20,9 +20,8 @@ This crate uses the native-frame `up-rust` transport API. `Mqtt5Transport` imple
 | --- | --- |
 | `UAttributes.source` / `sink` | MQTT topic and user properties |
 | `UAttributes` optional fields | MQTT user properties |
-| `UEncoding.content_type` | MQTT Content Type property |
-| `UEncoding.format_id` | MQTT user property |
-| `UEncoding.schema_ref` | MQTT user property when present |
+| Standard `PayloadEncoding` | MQTT user property with upstream `UPayloadFormat` value; Content Type when known |
+| Custom `PayloadEncoding` | MQTT user property with custom encoding ID plus Content Type |
 | Application payload bytes | MQTT PUBLISH payload |
 
 Payload codecs are selected by the application, not by the MQTT transport. For example, an already-encoded raw payload can be sent through the owned helper:
@@ -41,7 +40,7 @@ transport
 }
 ```
 
-On receive, typed decoders should use `UOwnedFrame::deserialize::<Codec, T>()`; the frame's reconstructed `UEncoding` is checked before payload bytes are handed to the decoder.
+On receive, typed decoders should use `UOwnedFrame::deserialize::<Codec, T>()`; the frame's reconstructed `PayloadEncoding` is checked before payload bytes are handed to the decoder.
 
 ## Building from Source
 
