@@ -91,6 +91,11 @@ const PARAM_MODE: &str = "mode";
 const DEFAULT_MAX_FILTERS: u16 = 50;
 const DEFAULT_MAX_LISTENERS_PER_FILTER: u16 = 10;
 
+struct IncomingDispatch {
+    frame: UOwnedFrame,
+    listeners: HashSet<ComparableOwnedListener>,
+}
+
 #[cfg_attr(feature = "cli", derive(Args))]
 /// Configuration options for the MQTT 5 transport.
 pub struct Mqtt5TransportOptions {
@@ -246,11 +251,11 @@ impl TransportMode {
     }
 }
 
-async fn process_incoming_message(
+fn prepare_incoming_message(
     registered_listeners: &dyn listener_registry::ListenerRegistry,
     message_mapper: &dyn mapping::MessageMapper,
     mqtt_message: paho_mqtt::Message,
-) {
+) -> Option<IncomingDispatch> {
     // Extract a native uProtocol frame from the MQTT PUBLISH packet.
     let frame = match message_mapper
         .create_frame_metadata_from_mqtt_properties(mqtt_message.properties())
@@ -263,18 +268,18 @@ async fn process_incoming_message(
                 UOwnedFrame::without_payload(header)
             } else {
                 debug!("MQTT PUBLISH packet contains payload but no payload encoding");
-                return;
+                return None;
             };
             if let Err(e) = validate_owned_frame_for_transport(&frame) {
                 debug!("Failed to validate MQTT PUBLISH packet as uProtocol frame: {e}");
-                return;
+                return None;
             }
             frame
         }
         Err(e) => {
             // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
             debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
-            return;
+            return None;
         }
     };
 
@@ -300,14 +305,21 @@ async fn process_incoming_message(
         }
     };
 
-    for listener in listeners_to_invoke {
+    Some(IncomingDispatch {
+        frame,
+        listeners: listeners_to_invoke,
+    })
+}
+
+async fn dispatch_incoming_message(dispatch: IncomingDispatch) {
+    for listener in dispatch.listeners {
         // Note that we are invoking the listener on the current thread!
         // It is the responsibility of the listener to spawn a new task
         // if processing the message is non-trivial.
         // This is a deliberate design choice to let implementers of
         // `UOwnedListener` decide how to handle incoming messages and use
         // a custom tokio runtime configuration.
-        listener.on_receive_owned(frame.clone()).await;
+        listener.on_receive_owned(dispatch.frame.clone()).await;
     }
 }
 
@@ -463,13 +475,17 @@ impl Mqtt5Transport {
 
     #[cfg(test)]
     pub(crate) async fn process_incoming_message(&self, mqtt_message: paho_mqtt::Message) {
-        let registered_listeners_read = self.registered_listeners.read().await;
-        process_incoming_message(
-            &*registered_listeners_read,
-            &*self.message_mapper,
-            mqtt_message,
-        )
-        .await;
+        let dispatch = {
+            let registered_listeners_read = self.registered_listeners.read().await;
+            prepare_incoming_message(
+                &*registered_listeners_read,
+                &*self.message_mapper,
+                mqtt_message,
+            )
+        };
+        if let Some(dispatch) = dispatch {
+            dispatch_incoming_message(dispatch).await;
+        }
     }
 
     /// Establishes the initial connection to the MQTT broker.
@@ -528,9 +544,17 @@ impl Mqtt5Transport {
                         .get_string(paho_mqtt::PropertyCode::ContentType)
                         .unwrap_or_else(|| "N/A".to_string())
                 );
-                let registered_listeners_read = cloned_registered_listeners.read().await;
-                process_incoming_message(&*registered_listeners_read, &*cloned_message_mapper, msg)
-                    .await;
+                let dispatch = {
+                    let registered_listeners_read = cloned_registered_listeners.read().await;
+                    prepare_incoming_message(
+                        &*registered_listeners_read,
+                        &*cloned_message_mapper,
+                        msg,
+                    )
+                };
+                if let Some(dispatch) = dispatch {
+                    dispatch_incoming_message(dispatch).await;
+                }
             }
         });
         self.message_callback_handle = Some(handle);
@@ -699,10 +723,29 @@ mod tests {
         frames: Mutex<Vec<UOwnedFrame>>,
     }
 
+    struct ReentrantRegisteringListener {
+        transport: Arc<Mqtt5Transport>,
+        source_filter: UUri,
+    }
+
     #[async_trait]
     impl UOwnedListener for RecordingOwnedListener {
         async fn on_receive_owned(&self, frame: UOwnedFrame) {
             self.frames.lock().await.push(frame);
+        }
+    }
+
+    #[async_trait]
+    impl UOwnedListener for ReentrantRegisteringListener {
+        async fn on_receive_owned(&self, _frame: UOwnedFrame) {
+            self.transport
+                .register_owned_listener(
+                    &self.source_filter,
+                    None,
+                    Arc::new(RecordingOwnedListener::default()),
+                )
+                .await
+                .expect("listener callback should be able to register another listener");
         }
     }
 
@@ -817,6 +860,47 @@ mod tests {
             .unregister_owned_listener(&source_filter, None, invoked_once.clone())
             .await
             .expect("failed to unregister listener");
+    }
+
+    #[tokio::test]
+    async fn test_incoming_dispatch_does_not_hold_registry_lock_across_callback() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().return_const(Ok(()));
+        client_operations.expect_unsubscribe().return_const(Ok(()));
+
+        let transport = Arc::new(Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        });
+        let listener: Arc<dyn UOwnedListener> = Arc::new(ReentrantRegisteringListener {
+            transport: Arc::clone(&transport),
+            source_filter: source_filter.clone(),
+        });
+        transport
+            .register_owned_listener(&source_filter, None, listener)
+            .await
+            .expect("failed to register listener");
+
+        let message = create_mqtt_publish_message(
+            &mapping::DefaultMessageMapper,
+            &UUID::build(),
+            &source,
+            "payload",
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            transport.process_incoming_message(message),
+        )
+        .await
+        .expect("dispatch should not deadlock on registry write from listener callback");
     }
 
     #[tokio::test]
@@ -1105,7 +1189,7 @@ mod tests {
             .finalize();
 
         // Process the message - it should be discarded due to validation error
-        process_incoming_message(&mock_registry, &mock_validator, mqtt_message).await;
+        assert!(prepare_incoming_message(&mock_registry, &mock_validator, mqtt_message).is_none());
 
         // If the test completes without panic, it means:
         // 1. The validator was called exactly once

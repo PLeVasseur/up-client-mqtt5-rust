@@ -147,6 +147,10 @@ impl RegisteredListeners {
         if let Some((subscription_id, listeners)) =
             self.subscriptions_by_topic_filter.get_mut(topic_filter)
         {
+            if listeners.contains(&comp_listener) {
+                return Ok(None);
+            }
+
             // [impl->dsn~utransport-registerlistener-error-resource-exhausted~1]
             if listeners.len() >= self.max_listeners_per_subscription {
                 return Err(UStatus::fail_with_code(
@@ -395,6 +399,16 @@ mod tests {
         assert!(registered_listeners
             .add_listener(topic_filter, listener.clone())
             .expect("Failed to register listener")
+            .is_none());
+
+        let mut full_registered_listeners = RegisteredListeners::new(1, 1);
+        assert!(full_registered_listeners
+            .add_listener(topic_filter, listener.clone())
+            .expect("Failed to register listener")
+            .is_some());
+        assert!(full_registered_listeners
+            .add_listener(topic_filter, listener.clone())
+            .expect("duplicate registration should be idempotent even at capacity")
             .is_none());
 
         let listeners = registered_listeners.determine_listeners_for_topic(topic);
