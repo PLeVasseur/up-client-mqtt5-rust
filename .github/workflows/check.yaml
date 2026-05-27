@@ -26,6 +26,7 @@ on:
       - "src/**"
       - "tests/**"
       - "Cargo.*"
+      - "clippy.toml"
   workflow_call:
     outputs:
       test_results_url:
