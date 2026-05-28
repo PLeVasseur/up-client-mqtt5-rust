@@ -713,7 +713,7 @@ mod tests {
     use up_rust::{
         payload::{PlacementDefault, StableContainerPayload},
         PayloadEncoding, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
-        UOwnedTransport, UUID,
+        UOwnedTransport, UPayloadFormat, UUID,
     };
 
     use test_case::test_case;
@@ -784,6 +784,24 @@ mod tests {
             .expect("failed to create MQTT topic string");
         let props = message_mapper
             .create_mqtt_properties_from_frame_metadata(&header)
+            .expect("invalid frame metadata");
+        paho_mqtt::MessageBuilder::new()
+            .topic(mqtt_topic)
+            .payload(payload)
+            .properties(props)
+            .finalize()
+    }
+
+    fn create_mqtt_message_from_header(
+        header: &UFrameMetadata,
+        source: &UUri,
+        payload: impl Into<Vec<u8>>,
+    ) -> paho_mqtt::Message {
+        let mqtt_topic = TransportMode::InVehicle
+            .to_mqtt_topic(source, None, "test_authority")
+            .expect("failed to create MQTT topic string");
+        let props = mapping::DefaultMessageMapper
+            .create_mqtt_properties_from_frame_metadata(header)
             .expect("invalid frame metadata");
         paho_mqtt::MessageBuilder::new()
             .topic(mqtt_topic)
@@ -928,6 +946,106 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].metadata().encoding(), header.encoding());
         assert_eq!(frames[0].payload_bytes(), payload);
+    }
+
+    #[tokio::test]
+    async fn incoming_empty_payload_without_encoding_becomes_no_payload() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().return_const(Ok(()));
+
+        let header = UFrameMetadata::publish(source.clone());
+        let message = create_mqtt_message_from_header(&header, &source, Vec::new());
+        let transport = Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        };
+        let listener = Arc::new(RecordingOwnedListener::default());
+        transport
+            .register_owned_listener(&source_filter, None, listener.clone())
+            .await
+            .expect("failed to register listener");
+
+        transport.process_incoming_message(message).await;
+
+        let frames = listener.frames.lock().await;
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].has_payload());
+        assert!(frames[0].payload_bytes().is_empty());
+        assert_eq!(frames[0].metadata().encoding(), None);
+    }
+
+    #[tokio::test]
+    async fn incoming_present_empty_payload_with_encoding_is_preserved() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().return_const(Ok(()));
+
+        let header = UFrameMetadata::publish(source.clone())
+            .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let message = create_mqtt_message_from_header(&header, &source, Vec::new());
+        let transport = Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        };
+        let listener = Arc::new(RecordingOwnedListener::default());
+        transport
+            .register_owned_listener(&source_filter, None, listener.clone())
+            .await
+            .expect("failed to register listener");
+
+        transport.process_incoming_message(message).await;
+
+        let frames = listener.frames.lock().await;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].has_payload());
+        assert!(frames[0].payload_bytes().is_empty());
+        assert_eq!(frames[0].metadata().encoding(), header.encoding());
+    }
+
+    #[tokio::test]
+    async fn incoming_non_empty_payload_without_encoding_is_dropped() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().return_const(Ok(()));
+
+        let header = UFrameMetadata::publish(source.clone());
+        let message = create_mqtt_message_from_header(&header, &source, b"invalid".to_vec());
+        let transport = Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        };
+        let listener = Arc::new(RecordingOwnedListener::default());
+        transport
+            .register_owned_listener(&source_filter, None, listener.clone())
+            .await
+            .expect("failed to register listener");
+
+        transport.process_incoming_message(message).await;
+
+        let frames = listener.frames.lock().await;
+        assert!(frames.is_empty());
     }
 
     #[tokio::test]
