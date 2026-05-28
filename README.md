@@ -8,13 +8,19 @@ Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-up-rust = { version = "0.9" }
+up-rust = { version = "0.11" }
 up-transport-mqtt5 = { version = "0.4" }
 ```
 
 Please refer to [the crate's Rust Docs](https://docs.rs/up-transport-mqtt5/) and the [examples](./examples/) folder to see how to configure and use the transport.
 
 This crate uses the native-frame `up-rust` transport API. `Mqtt5Transport` implements `UOwnedTransport`: it sends `UOwnedFrame` values and reconstructs native `UFrameMetadata` on receive. The transport is owned-buffer only; MQTT broker delivery does not provide true zero-copy transmit loans or receive leases.
+
+Stable-container payloads are preserved as owned MQTT payload bytes plus native
+`PayloadEncoding` metadata, including the `up.stable-container` custom encoding.
+MQTT does not expose loan-backed typed stable-container borrowing; use
+`UOwnedFrame::deserialize` or copy into a zero-copy-capable transport boundary
+when typed borrowing is required.
 
 | uProtocol frame part | MQTT 5 representation |
 | --- | --- |

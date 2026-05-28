@@ -44,7 +44,7 @@ The libraries need to be added to the `[dependencies]` section of the `Cargo.tom
 
 ```toml
 [dependencies]
-up-rust = { version = "0.9" }
+up-rust = { version = "0.11" }
 up-transport-mqtt5 = { version = "0.4" }
 ```
 
@@ -707,9 +707,11 @@ mod tests {
     use std::{str::FromStr, sync::Arc};
 
     use async_trait::async_trait;
+    use mapping::MessageMapper;
     use mqtt_client::MockMqttClientOperations;
     use tokio::sync::{Mutex, RwLock};
     use up_rust::{
+        payload::{PlacementDefault, StableContainerPayload},
         PayloadEncoding, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedListener,
         UOwnedTransport, UUID,
     };
@@ -717,6 +719,24 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+
+    #[repr(C)]
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Default,
+        Eq,
+        PartialEq,
+        PlacementDefault,
+        up_rust::StablePayload,
+        up_rust::ByteBackedStablePayload,
+    )]
+    #[stable_payload(type_name = "example.vehicle.VehiclePose")]
+    struct VehiclePose {
+        x: u32,
+        y: u32,
+    }
 
     #[derive(Default)]
     struct RecordingOwnedListener {
@@ -860,6 +880,54 @@ mod tests {
             .unregister_owned_listener(&source_filter, None, invoked_once.clone())
             .await
             .expect("failed to unregister listener");
+    }
+
+    #[tokio::test]
+    async fn stable_container_payload_metadata_and_bytes_survive_mqtt_mapping() {
+        let source_filter =
+            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+        let payload = [0x11_u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+        let mut client_operations = MockMqttClientOperations::new();
+        client_operations.expect_subscribe().return_const(Ok(()));
+        client_operations.expect_unsubscribe().return_const(Ok(()));
+
+        let message_mapper = mapping::DefaultMessageMapper;
+        let header = UFrameMetadata::publish(source.clone())
+            .with_encoding(StableContainerPayload::<VehiclePose>::encoding());
+        let mqtt_topic = TransportMode::InVehicle
+            .to_mqtt_topic(&source, None, "test_authority")
+            .expect("failed to create MQTT topic string");
+        let props = message_mapper
+            .create_mqtt_properties_from_frame_metadata(&header)
+            .expect("invalid frame metadata");
+        let message = paho_mqtt::MessageBuilder::new()
+            .topic(mqtt_topic)
+            .payload(payload)
+            .properties(props)
+            .finalize();
+
+        let transport = Mqtt5Transport {
+            mqtt_client: Arc::new(client_operations),
+            registered_listeners: Arc::new(RwLock::new(RegisteredListeners::default())),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "test".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        };
+        let listener = Arc::new(RecordingOwnedListener::default());
+        transport
+            .register_owned_listener(&source_filter, None, listener.clone())
+            .await
+            .expect("failed to register listener");
+
+        transport.process_incoming_message(message).await;
+
+        let frames = listener.frames.lock().await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].metadata().encoding(), header.encoding());
+        assert_eq!(frames[0].payload_bytes(), payload);
     }
 
     #[tokio::test]

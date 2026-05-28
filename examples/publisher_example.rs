@@ -16,10 +16,7 @@ use std::{str::FromStr, time::SystemTime};
 use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
-use up_rust::{
-    PayloadEncoding, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
-    UStatus, UUri, UUID,
-};
+use up_rust::{PayloadEncoding, UCode, UFrameBuilder, UOwnedTransport, UStatus, UUri};
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
 /// Publishes messages to a given topic using the MQTT 5 transport.
@@ -59,17 +56,13 @@ async fn main() -> Result<(), UStatus> {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let header = UFrameMetadata::new(
-            UAttributes::new(
-                UUID::build(),
-                command.topic.clone(),
-                None,
-                UMessageType::Publish,
+        let message = UFrameBuilder::publish(command.topic.clone())
+            .with_ttl(1000)
+            .build_with_payload(
+                current_time.to_string().into_bytes(),
+                PayloadEncoding::from_content_type("text/plain"),
             )
-            .with_ttl(1000),
-            PayloadEncoding::from_content_type("text/plain"),
-        );
-        let message = UOwnedFrame::new(header, current_time.to_string().into_bytes());
+            .map_err(|error| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, error.to_string()))?;
 
         if let Err(e) = client.send_owned(message).await {
             error!(
