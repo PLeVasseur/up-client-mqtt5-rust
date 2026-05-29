@@ -17,28 +17,25 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use up_rust::{
-    transport::verify_filter_criteria, validate_owned_frame_for_transport, UCode, UOwnedFrame,
-    UOwnedListener, UOwnedTransport, UStatus, UUri,
+    transport::{UOwnedTransportImpl, ValidatedOwnedFrame},
+    UCode, UOwnedListener, UStatus, UUri,
 };
 
 use crate::Mqtt5Transport;
 
 #[async_trait]
-impl UOwnedTransport for Mqtt5Transport {
-    async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
-        validate_owned_frame_for_transport(&frame)?;
+impl UOwnedTransportImpl for Mqtt5Transport {
+    async fn send_validated_owned(&self, frame: ValidatedOwnedFrame) -> Result<(), UStatus> {
         self.send_message(frame.metadata(), frame.payload().cloned())
             .await
     }
 
-    async fn register_owned_listener(
+    async fn register_validated_owned_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UOwnedListener>,
     ) -> Result<(), UStatus> {
-        // [impl->dsn~utransport-registerlistener-error-invalid-parameter~1]
-        verify_filter_criteria(source_filter, sink_filter)?;
         let topic = self
             .to_mqtt_topic_string(source_filter, sink_filter)
             .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
@@ -46,14 +43,12 @@ impl UOwnedTransport for Mqtt5Transport {
         self.add_listener(&topic, listener).await
     }
 
-    async fn unregister_owned_listener(
+    async fn unregister_validated_owned_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UOwnedListener>,
     ) -> Result<(), UStatus> {
-        // [impl->dsn~utransport-unregisterlistener-error-invalid-parameter~1]
-        verify_filter_criteria(source_filter, sink_filter)?;
         let topic = self
             .to_mqtt_topic_string(source_filter, sink_filter)
             .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
@@ -72,8 +67,7 @@ mod tests {
     use tokio::sync::RwLock;
     use up_rust::{
         payload::{RawBytes, UDeserializer, UWireError},
-        ProtobufPayload, UAttributes, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport,
-        UUID,
+        ProtobufPayload, UFrameMetadata, UOwnedFrame, UOwnedTransport,
     };
 
     use crate::{
@@ -85,13 +79,13 @@ mod tests {
 
     fn frame(source: &str, payload: &[u8]) -> UOwnedFrame {
         let source = UUri::from_str(source).expect("Expected a valid source value");
-        UOwnedFrame::new(
-            UFrameMetadata::new(
-                UAttributes::new(UUID::build(), source, None, UMessageType::Publish),
-                RawBytes::encoding(),
-            ),
+        UOwnedFrame::try_with_payload(
+            UFrameMetadata::try_publish(source)
+                .expect("valid publish metadata")
+                .with_encoding(RawBytes::encoding()),
             Bytes::copy_from_slice(payload),
         )
+        .expect("valid test frame")
     }
 
     #[tokio::test]
@@ -168,7 +162,7 @@ mod tests {
         let mut value = StringValue::new();
         value.value = "protobuf payload".to_string();
         let message_to_send = UOwnedFrame::from_serializable::<ProtobufPayload, _>(
-            UFrameMetadata::publish(source),
+            UFrameMetadata::try_publish(source).unwrap(),
             &value,
         )
         .unwrap();
@@ -210,10 +204,13 @@ mod tests {
     #[tokio::test]
     async fn send_owned_keeps_raw_payload_incompatible_with_protobuf_payload_codec() {
         let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").unwrap();
-        let message_to_send = UOwnedFrame::new(
-            UFrameMetadata::publish(source).with_encoding(RawBytes::encoding()),
+        let message_to_send = UOwnedFrame::try_with_payload(
+            UFrameMetadata::try_publish(source)
+                .unwrap()
+                .with_encoding(RawBytes::encoding()),
             [0x0a_u8].as_slice(),
-        );
+        )
+        .unwrap();
 
         let mut client_operations = MockMqttClientOperations::new();
         client_operations

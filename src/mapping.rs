@@ -265,7 +265,7 @@ impl MessageMapper for DefaultMessageMapper {
             .unwrap_or_default();
 
         let mut attributes =
-            UAttributes::new(id, source, sink, message_type).with_priority(priority);
+            UAttributes::new_unchecked(id, source, sink, message_type).with_priority(priority);
 
         if let Some(ttl_string) = props.find_user_property(KEY_TTL) {
             attributes = attributes.with_ttl(ttl_string.parse::<u32>().map_err(|e| {
@@ -369,7 +369,7 @@ impl MessageMapper for DefaultMessageMapper {
             }
         };
 
-        let header = UFrameMetadata::new(attributes, encoding);
+        let header = UFrameMetadata::new_unchecked(attributes, encoding);
         validate_header(&header)?;
         Ok(header)
     }
@@ -467,15 +467,16 @@ mod tests {
         let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").unwrap();
         let sink = UUri::from_str("//backend/A8001/1/0").unwrap();
         let request_id = UUID::build();
-        let attributes = UAttributes::new(UUID::build(), source, Some(sink), UMessageType::Request)
-            .with_priority(UPriority::CS4)
-            .with_ttl(3601)
-            .with_request_id(request_id)
-            .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
-            .with_token("token")
-            .with_permission_level(7)
-            .with_comm_status(UCode::UNAVAILABLE);
-        let header = UFrameMetadata::new(
+        let attributes =
+            UAttributes::new_unchecked(UUID::build(), source, Some(sink), UMessageType::Request)
+                .with_priority(UPriority::CS4)
+                .with_ttl(3601)
+                .with_request_id(request_id)
+                .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+                .with_token("token")
+                .with_permission_level(7)
+                .with_comm_status(UCode::UNAVAILABLE);
+        let header = UFrameMetadata::new_unchecked(
             attributes,
             PayloadEncoding::custom("custom-json", "application/custom+json"),
         );

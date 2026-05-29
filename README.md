@@ -22,6 +22,11 @@ MQTT does not expose loan-backed typed stable-container borrowing; use
 `UOwnedFrame::deserialize` or copy into a zero-copy-capable transport boundary
 when typed borrowing is required.
 
+Native-frame conformance coverage includes standard and custom payload encoding
+round trips, stable-container metadata preservation as owned bytes, rejection of
+payload bytes without encoding metadata, and exact delivery of MQTT PUBLISH
+payload bytes without exposing MQTT properties as application payload.
+
 | uProtocol frame part | MQTT 5 representation |
 | --- | --- |
 | `UAttributes.source` / `sink` | MQTT topic and user properties |

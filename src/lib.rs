@@ -263,11 +263,15 @@ fn prepare_incoming_message(
         Ok(header) => {
             let payload = mqtt_message.payload();
             let frame = if header.encoding().is_some() {
-                UOwnedFrame::new(header, Bytes::copy_from_slice(payload))
+                UOwnedFrame::try_with_payload(header, Bytes::copy_from_slice(payload))
             } else if payload.is_empty() {
-                UOwnedFrame::without_payload(header)
+                UOwnedFrame::try_without_payload(header)
             } else {
                 debug!("MQTT PUBLISH packet contains payload but no payload encoding");
+                return None;
+            };
+            let Ok(frame) = frame else {
+                debug!("Failed to construct MQTT PUBLISH packet as uProtocol frame");
                 return None;
             };
             if let Err(e) = validate_owned_frame_for_transport(&frame) {
@@ -775,10 +779,12 @@ mod tests {
         source: &UUri,
         payload: &str,
     ) -> paho_mqtt::Message {
-        let header = UFrameMetadata::new(
-            UAttributes::new(uuid.clone(), source.to_owned(), None, UMessageType::Publish),
+        let header = UFrameMetadata::try_new(
+            UAttributes::try_new(uuid.clone(), source.to_owned(), None, UMessageType::Publish)
+                .expect("valid publish attributes"),
             PayloadEncoding::from_content_type("text/plain"),
-        );
+        )
+        .expect("valid publish metadata");
         let mqtt_topic = TransportMode::InVehicle
             .to_mqtt_topic(source, None, "test_authority")
             .expect("failed to create MQTT topic string");
@@ -912,7 +918,8 @@ mod tests {
         client_operations.expect_unsubscribe().return_const(Ok(()));
 
         let message_mapper = mapping::DefaultMessageMapper;
-        let header = UFrameMetadata::publish(source.clone())
+        let header = UFrameMetadata::try_publish(source.clone())
+            .expect("valid publish metadata")
             .with_encoding(StableContainerPayload::<VehiclePose>::encoding());
         let mqtt_topic = TransportMode::InVehicle
             .to_mqtt_topic(&source, None, "test_authority")
@@ -957,7 +964,7 @@ mod tests {
         let mut client_operations = MockMqttClientOperations::new();
         client_operations.expect_subscribe().return_const(Ok(()));
 
-        let header = UFrameMetadata::publish(source.clone());
+        let header = UFrameMetadata::try_publish(source.clone()).expect("valid publish metadata");
         let message = create_mqtt_message_from_header(&header, &source, Vec::new());
         let transport = Mqtt5Transport {
             mqtt_client: Arc::new(client_operations),
@@ -991,7 +998,8 @@ mod tests {
         let mut client_operations = MockMqttClientOperations::new();
         client_operations.expect_subscribe().return_const(Ok(()));
 
-        let header = UFrameMetadata::publish(source.clone())
+        let header = UFrameMetadata::try_publish(source.clone())
+            .expect("valid publish metadata")
             .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let message = create_mqtt_message_from_header(&header, &source, Vec::new());
         let transport = Mqtt5Transport {
@@ -1026,7 +1034,7 @@ mod tests {
         let mut client_operations = MockMqttClientOperations::new();
         client_operations.expect_subscribe().return_const(Ok(()));
 
-        let header = UFrameMetadata::publish(source.clone());
+        let header = UFrameMetadata::try_publish(source.clone()).expect("valid publish metadata");
         let message = create_mqtt_message_from_header(&header, &source, b"invalid".to_vec());
         let transport = Mqtt5Transport {
             mqtt_client: Arc::new(client_operations),

@@ -52,13 +52,16 @@ impl UOwnedListener for NotifyingListener {
 }
 
 fn publish_frame(topic: UUri, payload: impl Into<Vec<u8>>) -> UOwnedFrame {
-    UOwnedFrame::new(
-        UFrameMetadata::new(
-            UAttributes::new(UUID::build(), topic, None, UMessageType::Publish),
+    UOwnedFrame::try_with_payload(
+        UFrameMetadata::try_new(
+            UAttributes::try_new(UUID::build(), topic, None, UMessageType::Publish)
+                .expect("valid publish attributes"),
             PayloadEncoding::from_content_type("text/plain"),
-        ),
+        )
+        .expect("valid publish metadata"),
         payload.into(),
     )
+    .expect("valid publish frame")
 }
 
 #[test_case::test_case(Some(MOSQUITTO_CONFIG_W_PERSISTENCE); "for Mosquitto with persistence")]
