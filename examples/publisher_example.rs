@@ -36,7 +36,7 @@ async fn main() -> Result<(), UStatus> {
     env_logger::init();
 
     let command = Command::parse();
-    let authority = command.topic.authority_name.clone();
+    let authority = command.topic.authority_name().to_string();
 
     let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
@@ -58,10 +58,7 @@ async fn main() -> Result<(), UStatus> {
             .as_secs();
         let message = UMessageBuilder::publish(command.topic.clone())
             .with_ttl(1000)
-            .build_with_payload(
-                current_time.to_string(),
-                UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-            )
+            .build_with_payload(current_time.to_string(), UPayloadFormat::Text)
             .expect("Failed to build message");
 
         if let Err(e) = client.send(message).await {

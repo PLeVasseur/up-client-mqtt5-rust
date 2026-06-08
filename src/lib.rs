@@ -143,7 +143,7 @@ impl TransportMode {
         } else if uri.has_wildcard_authority() {
             MQTT_TOPIC_ANY_SEGMENT_WILDCARD.to_string()
         } else {
-            uri.authority_name()
+            uri.authority_name().to_string()
         }
     }
 
@@ -240,11 +240,23 @@ async fn process_incoming_message(
     // extract uProtocol message from MQTT PUBLISH packet
     let umessage =
         match message_mapper.create_uattributes_from_mqtt_properties(mqtt_message.properties()) {
-            Ok(uattributes) => UMessage {
-                attributes: Some(uattributes).into(),
-                payload: Some(Bytes::copy_from_slice(mqtt_message.payload())),
-                ..Default::default()
-            },
+            Ok(uattributes) => {
+                let proto = up_rust::up_core_api::umessage::UMessage {
+                    attributes: Some(up_rust::up_core_api::uattributes::UAttributes::from(
+                        &uattributes,
+                    ))
+                    .into(),
+                    payload: Some(Bytes::copy_from_slice(mqtt_message.payload())),
+                    ..Default::default()
+                };
+                match UMessage::try_from(&proto) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        debug!("Failed to create uProtocol message from MQTT PUBLISH packet: {e}");
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 // [impl->dsn~utransport-registerlistener-discard-invalid-messages~1]
                 debug!("Failed to map MQTT PUBLISH packet to uProtocol message: {e}");
@@ -311,17 +323,18 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
     // use validation logic of UUri for authority name validation
     if authority_name.is_empty() || &authority_name == "*" {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "Authority name must be non-empty and must not be the wildcard authority name",
         ));
     }
 
     UUri::verify_authority(&authority_name).map_err(|err| {
         UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             format!("Invalid authority name: {err}"),
         )
-    })
+    })?;
+    Ok(authority_name)
 }
 
 /// An MQTT 5 based uProtocol transport implementation.
@@ -348,7 +361,7 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 /// ### Supported Message Delivery Methods
 ///
 /// The transport supports the [push delivery method](https://github.com/eclipse-uprotocol/up-spec/blob/v1.6.0-alpha.7/up-l1/README.adoc#5-message-delivery) only.
-/// The [Self::receive] function therefore always returns [UCode::UNIMPLEMENTED].
+/// The [Self::receive] function therefore always returns [UCode::Unimplemented].
 ///
 /// ### Maximum number of listeners
 ///
@@ -536,17 +549,12 @@ impl Mqtt5Transport {
             .create_mqtt_properties_from_uattributes(attributes)?;
 
         // Get mqtt topic string from source and sink uuris
-        let src_uri = attributes.source.as_ref().ok_or_else(|| {
-            UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "uProtocol Message has no source URI",
-            )
-        })?;
+        let src_uri = attributes.source();
         // [impl->dsn~up-transport-mqtt5-e2e-topic-names~1]
         // [impl->dsn~up-transport-mqtt5-d2d-topic-names~1]
         let topic = self
-            .to_mqtt_topic_string(src_uri, attributes.sink.as_ref())
-            .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
+            .to_mqtt_topic_string(src_uri, attributes.sink())
+            .map_err(|e| UStatus::fail_with_code(UCode::InvalidArgument, e.to_string()))?;
 
         let mut msg_builder = mqtt::MessageBuilder::new()
             .topic(topic.clone())
@@ -635,7 +643,7 @@ impl Mqtt5Transport {
         } else {
             // [impl->dsn~utransport-unregisterlistener-error-notfound~1]
             Err(UStatus::fail_with_code(
-                UCode::NOT_FOUND,
+                UCode::NotFound,
                 format!("No such listener registered for topic filter [{topic_filter}]"),
             ))
         }
@@ -675,18 +683,13 @@ mod tests {
     ) -> paho_mqtt::Message {
         let umessage = UMessageBuilder::publish(source.to_owned())
             .with_message_id(uuid.clone())
-            .build_with_payload(payload.to_owned(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
+            .build_with_payload(payload.to_owned(), UPayloadFormat::Text)
             .expect("failed to create UMessage");
         let mqtt_topic = TransportMode::InVehicle
             .to_mqtt_topic(source, None, "test_authority")
             .expect("failed to create MQTT topic string");
         let props = message_mapper
-            .create_mqtt_properties_from_uattributes(
-                umessage
-                    .attributes
-                    .as_ref()
-                    .expect("UMessage has no attributes"),
-            )
+            .create_mqtt_properties_from_uattributes(umessage.attributes())
             .expect("invalid uattributes");
         paho_mqtt::MessageBuilder::new()
             .topic(mqtt_topic)
@@ -764,7 +767,7 @@ mod tests {
                 let expected_id = expected_ignored_message_ids
                     .pop_back()
                     .expect("no more expected ignored message ids");
-                assert_eq!(msg.id_unchecked(), &expected_id);
+                assert_eq!(msg.id(), &expected_id);
             });
 
         let mut listener_registry = RegisteredListeners::default();
@@ -791,7 +794,7 @@ mod tests {
             .returning(move |msg| {
                 // we make sure that the message being processed is the one that
                 // has been published after the listener had been registered
-                assert_eq!(msg.id_unchecked(), &message_id_2);
+                assert_eq!(msg.id(), &message_id_2);
             });
         let invoked_once = Arc::new(invoked_once);
 
@@ -854,7 +857,7 @@ mod tests {
         assert!(mqtt_transport
             .remove_listener(topic_filter, listener.clone())
             .await
-            .is_err_and(|err| err.get_code() == UCode::NOT_FOUND));
+            .is_err_and(|err| err.get_code() == UCode::NotFound));
     }
 
     #[test_case(
@@ -1059,7 +1062,7 @@ mod tests {
             .once()
             .returning(|_| {
                 Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
+                    UCode::InvalidArgument,
                     "Invalid MQTT message properties",
                 ))
             });
