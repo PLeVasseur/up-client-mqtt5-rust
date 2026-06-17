@@ -13,6 +13,15 @@
 use testcontainers::{runners::SyncRunner, GenericImage};
 
 pub fn main() {
+    println!("cargo::rerun-if-env-changed=UP_MQTT5_TEST_BROKER_MODE");
+    if std::env::var("UP_MQTT5_TEST_BROKER_MODE")
+        .is_ok_and(|mode| mode.eq_ignore_ascii_case("native"))
+    {
+        eprintln!("Using native Mosquitto for MQTT5 integration tests");
+        println!("cargo::rustc-cfg=docker_available");
+        return;
+    }
+
     // Try to pull the Mosquitto MQTT broker container image which will be needed to
     // run integration tests.
     if let Err(err) = GenericImage::new("eclipse-mosquitto", "2.0").pull_image() {

@@ -44,6 +44,14 @@ To run the tests from the repo root directory, run
 cargo test
 ```
 
+The integration tests start Mosquitto with Docker by default. If Docker is unavailable or cannot start containers in the current runner, use a native Mosquitto binary from `PATH` instead:
+
+```bash
+UP_MQTT5_TEST_BROKER_MODE=native cargo test --all-targets --locked
+```
+
+Set `UP_MQTT5_TEST_MOSQUITTO=/path/to/mosquitto` to use a specific Mosquitto executable.
+
 ### Running the Examples
 
 The examples show how the transport can be used to publish uProtocol messages from one uEntity and consume these messages on another uEntity.
