@@ -51,7 +51,7 @@ protobuf = { version = "3.7.2" }
 rand = { version = "0.9.4" }
 slab = { version = "0.4.11" }
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "75d8c108d2884957a9863579f408b9437c2b5392", default-features = false }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "d40e4b01947e3f61d29c3edc8136ba3084e344be", default-features = false }
 
 [build-dependencies]
 testcontainers = { version = "0.27.3", default-features = false, features = ["blocking"] }
@@ -75,7 +75,7 @@ tokio = { version = "1.45.1", default-features = false, features = [
     "signal",
     "sync",
 ] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "75d8c108d2884957a9863579f408b9437c2b5392", default-features = false, features = ["test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "d40e4b01947e3f61d29c3edc8136ba3084e344be", default-features = false, features = ["test-util"] }
 
 [[example]]
 name = "publisher_example"
