@@ -1746,7 +1746,6 @@ version = "3.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
 dependencies = [
- "bytes",
  "once_cell",
  "protobuf-support",
  "thiserror 1.0.69",
@@ -2762,13 +2761,12 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=d40e4b01947e3f61d29c3edc8136ba3084e344be#d40e4b01947e3f61d29c3edc8136ba3084e344be"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=d00aa18f0dccee1b9271123cd546de62acfccab3#d00aa18f0dccee1b9271123cd546de62acfccab3"
 dependencies = [
  "async-trait",
  "bytes",
  "mediatype",
  "mockall 0.13.1",
- "protobuf",
  "protobuf-codegen",
  "protoc-bin-vendored",
  "rand 0.9.4",
@@ -2782,7 +2780,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=d40e4b01947e3f61d29c3edc8136ba3084e344be#d40e4b01947e3f61d29c3edc8136ba3084e344be"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=d00aa18f0dccee1b9271123cd546de62acfccab3#d00aa18f0dccee1b9271123cd546de62acfccab3"
 dependencies = [
  "proc-macro2",
  "quote",

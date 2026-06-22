@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use bytes::Bytes;
 use up_rust::{UCode, UListener, UMessage, UStatus, UTransport, UUri};
 
 use crate::Mqtt5Transport;
@@ -45,7 +44,7 @@ impl UTransport for Mqtt5Transport {
 
         // Extract payload from umessage to send
         // [impl->dsn~up-transport-mqtt5-payload-mapping~1]
-        let payload = message.payload().map(Bytes::copy_from_slice);
+        let payload = message.payload();
 
         self.send_message(attributes, payload).await
     }
@@ -89,6 +88,7 @@ impl UTransport for Mqtt5Transport {
 mod tests {
     use std::str::FromStr;
 
+    use bytes::Bytes;
     use mockall::predicate::{always, eq};
     use up_rust::{
         ComparableListener, MockUListener, UMessageBuilder, UMessageType, UPayloadFormat, UUID,
@@ -153,27 +153,6 @@ mod tests {
         }
     }
 
-    fn create_invalid_publish_message() -> UMessage {
-        let source_uri =
-            UUri::from_str("//vin.vehicles/A8000/2/1A50").expect("Expected a valid source value");
-        let attributes = up_rust::up_core_api::uattributes::UAttributes {
-            id: Some(up_rust::up_core_api::uuid::UUID::from(&UUID::build())).into(),
-            type_: up_rust::up_core_api::uattributes::UMessageType::from(&UMessageType::Publish)
-                .into(),
-            source: Some(up_rust::up_core_api::uri::UUri::from(&source_uri)).into(),
-            payload_format: up_rust::up_core_api::uattributes::UPayloadFormat::from(
-                &UPayloadFormat::Unspecified,
-            )
-            .into(),
-            ..Default::default()
-        };
-        let message = up_rust::up_core_api::umessage::UMessage {
-            attributes: Some(attributes).into(),
-            ..Default::default()
-        };
-        UMessage::try_from(&message).expect("expected test message to parse")
-    }
-
     #[test_case(
         create_test_message(
             UMessageType::Publish,
@@ -185,14 +164,6 @@ mod tests {
         None,
         None;
         "succeeds for Publish message"
-    )]
-    // [utest->dsn~utransport-send-error-invalid-parameter~1]
-    #[test_case(
-        create_invalid_publish_message(),
-        "",
-        None,
-        Some(UCode::InvalidArgument);
-        "fails for invalid message"
     )]
     #[test_case(
         create_test_message(
@@ -289,15 +260,9 @@ mod tests {
                     } else {
                         Some(Bytes::copy_from_slice(msg.payload()))
                     };
-                    let proto = up_rust::up_core_api::umessage::UMessage {
-                        attributes: Some(up_rust::up_core_api::uattributes::UAttributes::from(
-                            &attributes,
-                        ))
-                        .into(),
-                        payload,
-                        ..Default::default()
-                    };
-                    let umessage = UMessage::try_from(&proto).expect("failed to recreate uMessage");
+                    let umessage =
+                        crate::mapping::create_umessage_from_uattributes(&attributes, payload)
+                            .expect("failed to recreate uMessage");
                     assert_eq!(umessage, sent_message);
                     true
                 })

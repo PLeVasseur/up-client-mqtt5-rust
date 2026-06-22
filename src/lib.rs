@@ -59,7 +59,7 @@ use paho_mqtt::{self as mqtt, Message, QOS_1};
 use tokio::{sync::RwLock, task::JoinHandle};
 #[allow(unused_imports)]
 use up_rust::UTransport;
-use up_rust::{ComparableListener, UAttributes, UCode, UMessage, UStatus, UUri, UUriError};
+use up_rust::{ComparableListener, UAttributes, UCode, UStatus, UUri, UUriError};
 
 mod listener_registry;
 mod mapping;
@@ -241,15 +241,10 @@ async fn process_incoming_message(
     let umessage =
         match message_mapper.create_uattributes_from_mqtt_properties(mqtt_message.properties()) {
             Ok(uattributes) => {
-                let proto = up_rust::up_core_api::umessage::UMessage {
-                    attributes: Some(up_rust::up_core_api::uattributes::UAttributes::from(
-                        &uattributes,
-                    ))
-                    .into(),
-                    payload: Some(Bytes::copy_from_slice(mqtt_message.payload())),
-                    ..Default::default()
-                };
-                match UMessage::try_from(&proto) {
+                match mapping::create_umessage_from_uattributes(
+                    &uattributes,
+                    Some(Bytes::copy_from_slice(mqtt_message.payload())),
+                ) {
                     Ok(message) => message,
                     Err(e) => {
                         debug!("Failed to create uProtocol message from MQTT PUBLISH packet: {e}");

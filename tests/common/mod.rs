@@ -85,7 +85,7 @@ pub(crate) struct MosquittoBroker {
 
 enum MosquittoBrokerBackend {
     Docker {
-        broker: ContainerAsync<GenericImage>,
+        broker: Box<ContainerAsync<GenericImage>>,
         _config_path: TempPath,
         _passwords_path: TempPath,
         _acl_path: TempPath,
@@ -274,7 +274,7 @@ pub(crate) async fn start_mosquitto(
 
     MosquittoBroker {
         backend: MosquittoBrokerBackend::Docker {
-            broker: container,
+            broker: Box::new(container),
             _config_path: config_path,
             _passwords_path: password_path,
             _acl_path: acl_path,
