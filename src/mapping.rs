@@ -15,8 +15,8 @@ use std::str::FromStr;
 
 use bytes::Bytes;
 use up_rust::{
-    UAttributes, UAttributesValidators, UCode, UMessage, UMessageBuilder, UMessageType,
-    UPayloadFormat, UPriority, UStatus, UUri, UUID,
+    PayloadEncoding, UAttributes, UAttributesValidators, UCode, UMessage, UMessageBuilder,
+    UMessageType, UPayloadFormat, UPriority, UStatus, UUri, UUID,
 };
 
 const CURRENT_UPROTOCOL_MAJOR_VERSION: u8 = 1;
@@ -33,6 +33,9 @@ const KEY_PERMISSION_LEVEL: &str = "7";
 const KEY_COMMSTATUS: &str = "8";
 const KEY_TOKEN: &str = "10";
 const KEY_TRACEPARENT: &str = "11";
+const KEY_PAYLOAD_ENCODING_REGISTRY_ID: &str = "13";
+const KEY_PAYLOAD_ENCODING: &str = "14";
+const KEY_PAYLOAD_CONTENT_TYPE: &str = "15";
 
 fn missing_required_attribute(name: &str) -> UStatus {
     UStatus::fail_with_code(
@@ -111,9 +114,21 @@ pub(crate) fn create_umessage_from_uattributes(
     let payload_format = attributes
         .payload_format()
         .unwrap_or(UPayloadFormat::Unspecified);
+    let open_payload_encoding = attributes.open_payload_encoding_parts();
 
     let result = if let Some(payload) = payload {
-        builder.build_with_payload(payload, payload_format)
+        if open_payload_encoding != (None, None, None) {
+            builder.build_with_payload_encoding(
+                payload,
+                open_payload_encoding_from_parts(
+                    open_payload_encoding.0,
+                    open_payload_encoding.1,
+                    open_payload_encoding.2,
+                )?,
+            )
+        } else {
+            builder.build_with_payload(payload, payload_format)
+        }
     } else {
         builder.build()
     };
@@ -131,6 +146,24 @@ fn add_user_property(
     properties
         .push_string_pair(paho_mqtt::PropertyCode::UserProperty, key, value)
         .map_err(|e| UStatus::fail_with_code(UCode::Internal, format!("{error_message}: {e:?}")))
+}
+
+fn open_payload_encoding_from_parts(
+    registry_id: Option<u32>,
+    encoding: Option<&str>,
+    content_type: Option<&str>,
+) -> Result<PayloadEncoding, UStatus> {
+    PayloadEncoding::from_parts(
+        registry_id,
+        encoding.map(ToOwned::to_owned),
+        content_type.map(ToOwned::to_owned),
+    )
+    .map_err(|err| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            format!("Failed to map open payload encoding fields: {err}"),
+        )
+    })
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -323,6 +356,33 @@ impl MessageMapper for DefaultMessageMapper {
             }
         }
 
+        let (payload_encoding_registry_id, payload_encoding, payload_content_type) =
+            attributes.open_payload_encoding_parts();
+        if let Some(registry_id) = payload_encoding_registry_id {
+            add_user_property(
+                &mut properties,
+                KEY_PAYLOAD_ENCODING_REGISTRY_ID,
+                &registry_id.to_string(),
+                "Failed to add payload encoding registry ID to MQTT User Properties",
+            )?;
+        }
+        if let Some(encoding) = payload_encoding {
+            add_user_property(
+                &mut properties,
+                KEY_PAYLOAD_ENCODING,
+                encoding,
+                "Failed to add payload encoding to MQTT User Properties",
+            )?;
+        }
+        if let Some(content_type) = payload_content_type {
+            add_user_property(
+                &mut properties,
+                KEY_PAYLOAD_CONTENT_TYPE,
+                content_type,
+                "Failed to add payload content type to MQTT User Properties",
+            )?;
+        }
+
         Ok(properties)
     }
 
@@ -489,6 +549,32 @@ impl MessageMapper for DefaultMessageMapper {
         } else {
             None
         };
+        let open_payload_encoding_registry_id = props
+            .find_user_property(KEY_PAYLOAD_ENCODING_REGISTRY_ID)
+            .map(|value| {
+                value.parse::<u32>().map_err(|err| {
+                    UStatus::fail_with_code(
+                        UCode::InvalidArgument,
+                        format!(
+                            "Failed to map UserProperty {KEY_PAYLOAD_ENCODING_REGISTRY_ID} to Payload Encoding Registry ID: {err}"
+                        ),
+                    )
+                })
+            })
+            .transpose()?;
+        let open_payload_encoding = props.find_user_property(KEY_PAYLOAD_ENCODING);
+        let open_payload_content_type = props.find_user_property(KEY_PAYLOAD_CONTENT_TYPE);
+        let open_payload_encoding_present = open_payload_encoding_registry_id.is_some()
+            || open_payload_encoding.is_some()
+            || open_payload_content_type.is_some();
+        if payload_format.is_some_and(|format| format != UPayloadFormat::Unspecified)
+            && open_payload_encoding_present
+        {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "MQTT message contains both Content Type payload_format and open payload encoding user properties",
+            ));
+        }
 
         let mut builder = match message_type {
             UMessageType::Publish => UMessageBuilder::publish(source),
@@ -537,11 +623,26 @@ impl MessageMapper for DefaultMessageMapper {
             UMessageType::Publish | UMessageType::Notification => {}
         }
 
-        let attributes = builder
-            .build_with_payload(
+        let message = if open_payload_encoding_present {
+            let payload_encoding = open_payload_encoding_from_parts(
+                open_payload_encoding_registry_id,
+                open_payload_encoding.as_deref(),
+                open_payload_content_type.as_deref(),
+            )?;
+            if payload_encoding.to_legacy_format().is_some() {
+                return Err(UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "registered payload encodings must use MQTT Content Type payload_format, not open payload encoding user properties",
+                ));
+            }
+            builder.build_with_payload_encoding(Bytes::new(), payload_encoding)
+        } else {
+            builder.build_with_payload(
                 Bytes::new(),
                 payload_format.unwrap_or(UPayloadFormat::Unspecified),
             )
+        };
+        let attributes = message
             .map_err(|e| {
                 UStatus::fail_with_code(
                     UCode::InvalidArgument,
@@ -848,11 +949,28 @@ mod tests {
         properties
     }
 
+    fn open_payload_encoding() -> PayloadEncoding {
+        PayloadEncoding::custom("up.xcdr-v2", "application/vnd.uprotocol.xcdr-v2")
+            .expect("open payload encoding")
+    }
+
+    fn open_payload_encoding_attributes() -> UAttributes {
+        UMessageBuilder::publish(UUri::from_str("/A10D/4/B3AA").expect("valid source"))
+            .build_with_payload_encoding(Bytes::new(), open_payload_encoding())
+            .expect("valid message")
+            .attributes()
+            .clone()
+    }
+
     /// Verifies that two sets of MQTT properties contain the same items.
     fn assert_mqtt_properties(
         properties: &paho_mqtt::Properties,
         expected_properties: &paho_mqtt::Properties,
     ) {
+        assert_eq!(
+            properties.get_string(paho_mqtt::PropertyCode::ContentType),
+            expected_properties.get_string(paho_mqtt::PropertyCode::ContentType)
+        );
         assert_eq!(
             properties
                 .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
@@ -864,6 +982,180 @@ mod tests {
         properties.user_iter().for_each(|(key, value)| {
             assert_eq!(expected_properties.find_user_property(&key), Some(value));
         });
+    }
+
+    #[test]
+    fn mqtt_properties_include_open_payload_encoding_user_properties() {
+        let mapper = DefaultMessageMapper;
+        let properties = mapper
+            .create_mqtt_properties_from_uattributes(&open_payload_encoding_attributes())
+            .expect("properties");
+
+        assert_eq!(
+            properties.get_string(paho_mqtt::PropertyCode::ContentType),
+            None
+        );
+        assert_eq!(
+            properties.find_user_property(KEY_PAYLOAD_ENCODING_REGISTRY_ID),
+            None
+        );
+        assert_eq!(
+            properties.find_user_property(KEY_PAYLOAD_ENCODING),
+            Some("up.xcdr-v2".to_string())
+        );
+        assert_eq!(
+            properties.find_user_property(KEY_PAYLOAD_CONTENT_TYPE),
+            Some("application/vnd.uprotocol.xcdr-v2".to_string())
+        );
+    }
+
+    #[test]
+    fn mqtt_properties_decode_open_payload_encoding_user_properties() {
+        let mapper = DefaultMessageMapper;
+        let message_id = UUID::build();
+        let mut properties = create_mqtt_properties(
+            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
+            Some(UMessageType::Publish),
+            Some(&message_id),
+            Some("//vin.vehicles/A8000/2/8A50"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_ENCODING,
+                "up.xcdr-v2",
+            )
+            .unwrap();
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_CONTENT_TYPE,
+                "application/vnd.uprotocol.xcdr-v2",
+            )
+            .unwrap();
+
+        let attributes = mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .expect("attributes");
+
+        assert!(matches!(
+            attributes.payload_format(),
+            None | Some(UPayloadFormat::Unspecified)
+        ));
+        assert_eq!(
+            attributes.open_payload_encoding_parts(),
+            (
+                None,
+                Some("up.xcdr-v2"),
+                Some("application/vnd.uprotocol.xcdr-v2")
+            )
+        );
+    }
+
+    #[test]
+    fn create_umessage_from_uattributes_preserves_open_payload_encoding() {
+        let attributes = open_payload_encoding_attributes();
+        let message = create_umessage_from_uattributes(
+            &attributes,
+            Some(Bytes::from_static(b"encoded payload")),
+        )
+        .expect("message");
+
+        assert_eq!(
+            message.payload(),
+            Some(Bytes::from_static(b"encoded payload"))
+        );
+        assert_eq!(
+            message.attributes().open_payload_encoding_parts(),
+            attributes.open_payload_encoding_parts()
+        );
+    }
+
+    #[test]
+    fn mqtt_properties_reject_both_payload_encoding_mechanisms() {
+        let mapper = DefaultMessageMapper;
+        let message_id = UUID::build();
+        let mut properties = create_mqtt_properties(
+            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
+            Some(UMessageType::Publish),
+            Some(&message_id),
+            Some("//vin.vehicles/A8000/2/8A50"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(UPayloadFormat::Text),
+        );
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_ENCODING,
+                "up.xcdr-v2",
+            )
+            .unwrap();
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_CONTENT_TYPE,
+                "application/vnd.uprotocol.xcdr-v2",
+            )
+            .unwrap();
+
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn mqtt_properties_reject_registered_encoding_in_open_fields() {
+        let mapper = DefaultMessageMapper;
+        let message_id = UUID::build();
+        let mut properties = create_mqtt_properties(
+            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
+            Some(UMessageType::Publish),
+            Some(&message_id),
+            Some("//vin.vehicles/A8000/2/8A50"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_ENCODING,
+                "up.raw",
+            )
+            .unwrap();
+        properties
+            .push_string_pair(
+                paho_mqtt::PropertyCode::UserProperty,
+                KEY_PAYLOAD_CONTENT_TYPE,
+                "application/octet-stream",
+            )
+            .unwrap();
+
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
     }
 
     //

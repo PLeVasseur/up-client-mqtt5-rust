@@ -91,7 +91,8 @@ mod tests {
     use bytes::Bytes;
     use mockall::predicate::{always, eq};
     use up_rust::{
-        ComparableListener, MockUListener, UMessageBuilder, UMessageType, UPayloadFormat, UUID,
+        ComparableListener, MockUListener, PayloadEncoding, UMessageBuilder, UMessageType,
+        UPayloadFormat, UUID,
     };
 
     use test_case::test_case;
@@ -153,6 +154,18 @@ mod tests {
         }
     }
 
+    fn create_open_payload_publish_message(source: &str, payload: &str) -> UMessage {
+        let source_uri = UUri::from_str(source).expect("Expected a valid source value");
+        UMessageBuilder::publish(source_uri)
+            .with_priority(up_rust::UPriority::CS1)
+            .build_with_payload_encoding(
+                payload.to_string(),
+                PayloadEncoding::custom("up.xcdr-v2", "application/vnd.uprotocol.xcdr-v2")
+                    .expect("open payload encoding"),
+            )
+            .unwrap()
+    }
+
     #[test_case(
         create_test_message(
             UMessageType::Publish,
@@ -164,6 +177,26 @@ mod tests {
         None,
         None;
         "succeeds for Publish message"
+    )]
+    #[test_case(
+        create_open_payload_publish_message(
+            "//vin.vehicles/A8000/2/8A50",
+            "payload",
+        ),
+        "vin.vehicles/8000/A/2/8A50",
+        None,
+        None;
+        "succeeds for Publish message with open payload encoding"
+    )]
+    #[test_case(
+        create_open_payload_publish_message(
+            "//vin.vehicles/A8000/2/8A50",
+            "",
+        ),
+        "vin.vehicles/8000/A/2/8A50",
+        None,
+        None;
+        "succeeds for Publish message with empty open payload encoding"
     )]
     #[test_case(
         create_test_message(
@@ -255,11 +288,7 @@ mod tests {
                         .create_uattributes_from_mqtt_properties(msg.properties())
                         .expect("failed to recreate uAttributes");
                     // [utest->dsn~up-transport-mqtt5-payload-mapping~1]
-                    let payload = if msg.payload().is_empty() {
-                        None
-                    } else {
-                        Some(Bytes::copy_from_slice(msg.payload()))
-                    };
+                    let payload = Some(Bytes::copy_from_slice(msg.payload()));
                     let umessage =
                         crate::mapping::create_umessage_from_uattributes(&attributes, payload)
                             .expect("failed to recreate uMessage");
