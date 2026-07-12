@@ -2761,7 +2761,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=314bc1171d538ee22a1a874dea616d3a28d7f03c#314bc1171d538ee22a1a874dea616d3a28d7f03c"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=31ee659aae9588fabfd99678730a8229a0cdc18c#31ee659aae9588fabfd99678730a8229a0cdc18c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2780,7 +2780,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=314bc1171d538ee22a1a874dea616d3a28d7f03c#314bc1171d538ee22a1a874dea616d3a28d7f03c"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=31ee659aae9588fabfd99678730a8229a0cdc18c#31ee659aae9588fabfd99678730a8229a0cdc18c"
 dependencies = [
  "proc-macro2",
  "quote",
