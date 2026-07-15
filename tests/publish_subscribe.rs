@@ -179,7 +179,7 @@ async fn test_connect_fails_for_wrong_credentials() {
             // this is not generally required by the MQTT 5 spec but we know that
             // the Mosquitto broker returns a CONNACK with reason code 135 instead
             // of simply closing the connection
-            err.get_code() == UCode::PermissionDenied
+            err.code() == UCode::PermissionDenied
         }),
         "expected connection to fail due to wrong credentials"
     );
@@ -235,7 +235,7 @@ async fn test_publish_fails_if_unauthorized() {
             .await
             .is_err_and(|err| {
                 debug!("failed to publish message: {err:?}");
-                err.get_code() == UCode::PermissionDenied
+                err.code() == UCode::PermissionDenied
             }),
         "expected publishing to topic to fail due to missing authority"
     );

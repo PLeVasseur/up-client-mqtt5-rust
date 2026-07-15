@@ -208,7 +208,7 @@ impl MessageMapper for DefaultMessageMapper {
     ) -> Result<paho_mqtt::Properties, UStatus> {
         // No need to start conversion if attributes are invalid
         // [impl->dsn~utransport-send-error-invalid-parameter~1]
-        UAttributesValidators::get_validator_for_attributes(attributes)
+        UAttributesValidators::validator_for_attributes(attributes)
             .validate(attributes)
             .map_err(|e| {
                 UStatus::fail_with_code(
@@ -653,7 +653,7 @@ impl MessageMapper for DefaultMessageMapper {
             .clone();
 
         // Validate the reconstructed attributes
-        let validator = UAttributesValidators::get_validator_for_attributes(&attributes);
+        let validator = UAttributesValidators::validator_for_attributes(&attributes);
         validator.validate(&attributes).map_err(|e| {
             UStatus::fail_with_code(
                 UCode::InvalidArgument,
@@ -1116,7 +1116,7 @@ mod tests {
 
         assert!(mapper
             .create_uattributes_from_mqtt_properties(&properties)
-            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
+            .is_err_and(|err| err.code() == UCode::InvalidArgument));
     }
 
     #[test]
@@ -1155,7 +1155,7 @@ mod tests {
 
         assert!(mapper
             .create_uattributes_from_mqtt_properties(&properties)
-            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
+            .is_err_and(|err| err.code() == UCode::InvalidArgument));
     }
 
     //
@@ -1297,7 +1297,7 @@ mod tests {
         let mapper = DefaultMessageMapper;
         let attributes_result = mapper.create_uattributes_from_mqtt_properties(&mqtt_properties);
         if let Some(code) = expected_error_code {
-            assert!(attributes_result.is_err_and(|err| err.get_code() == code))
+            assert!(attributes_result.is_err_and(|err| err.code() == code))
         } else {
             assert!(attributes_result.is_ok_and(|attribs| attribs == expected_attributes));
         }

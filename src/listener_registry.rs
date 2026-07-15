@@ -431,13 +431,13 @@ mod tests {
         // [utest->dsn~utransport-registerlistener-error-resource-exhausted~1]
         assert!(registered_listeners
                 .add_listener(topic_filter_1, listener_2.clone())
-                .is_err_and(|err| err.get_code() == UCode::ResourceExhausted),
+                .is_err_and(|err| err.code() == UCode::ResourceExhausted),
             "It should not have been possible to register another listener for the same topic filter"
         );
         assert!(
             registered_listeners
                 .add_listener(topic_filter_2, listener_2.clone())
-                .is_err_and(|err| err.get_code() == UCode::ResourceExhausted),
+                .is_err_and(|err| err.code() == UCode::ResourceExhausted),
             "It should not have been possible to register a listener for another topic filter"
         );
     }

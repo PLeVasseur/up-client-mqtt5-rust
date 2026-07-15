@@ -313,7 +313,7 @@ mod tests {
         let send_result = client.send(message_to_send).await;
 
         if let Some(error_code) = expected_error_code {
-            assert!(send_result.is_err_and(|err| err.get_code() == error_code));
+            assert!(send_result.is_err_and(|err| err.code() == error_code));
         } else {
             assert!(send_result.is_ok());
         }
@@ -389,7 +389,7 @@ mod tests {
             .determine_listeners_for_topic(&expected_topic_filter);
 
         if let Some(error_code) = expected_error_code {
-            assert!(register_result.is_err_and(|err| err.get_code() == error_code));
+            assert!(register_result.is_err_and(|err| err.code() == error_code));
             assert!(listeners_for_expected_topic.is_empty());
         } else {
             assert!(
@@ -452,7 +452,7 @@ mod tests {
                 Arc::new(MockUListener::new())
             )
             .await
-            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
+            .is_err_and(|err| err.code() == UCode::InvalidArgument));
 
         // [utest->dsn~utransport-unregisterlistener-error-invalid-parameter~1]
         assert!(client
@@ -464,7 +464,7 @@ mod tests {
                 Arc::new(MockUListener::new())
             )
             .await
-            .is_err_and(|err| err.get_code() == UCode::InvalidArgument));
+            .is_err_and(|err| err.code() == UCode::InvalidArgument));
     }
 
     // [utest->dsn~utransport-unregisterlistener-error-unimplemented~1]
@@ -534,7 +534,7 @@ mod tests {
             .await;
 
         if let Some(error_code) = expected_error_code {
-            assert!(unregister_result.is_err_and(|err| err.get_code() == error_code));
+            assert!(unregister_result.is_err_and(|err| err.code() == error_code));
             let listeners_for_topic_filter = registered_listeners
                 .read()
                 .await
@@ -555,7 +555,7 @@ mod tests {
             let empty_result = client
                 .unregister_listener(&source_uri, sink_uri.as_ref(), listener.clone())
                 .await;
-            assert!(empty_result.is_err_and(|err| { err.get_code() == UCode::NotFound }));
+            assert!(empty_result.is_err_and(|err| { err.code() == UCode::NotFound }));
         }
     }
 
@@ -580,6 +580,6 @@ mod tests {
                 None
             )
             .await
-            .is_err_and(|err| err.get_code() == UCode::Unimplemented));
+            .is_err_and(|err| err.code() == UCode::Unimplemented));
     }
 }

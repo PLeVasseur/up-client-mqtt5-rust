@@ -743,6 +743,6 @@ mod tests {
         "packet too large")]
     // [utest->dsn~mapping-of-reason-codes~1]
     fn test_ustatus_from_paho_error(paho_error: paho_mqtt::Error) -> UCode {
-        ustatus_from_paho_error(paho_error).get_code()
+        ustatus_from_paho_error(paho_error).code()
     }
 }

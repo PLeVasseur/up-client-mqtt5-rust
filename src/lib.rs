@@ -852,7 +852,7 @@ mod tests {
         assert!(mqtt_transport
             .remove_listener(topic_filter, listener.clone())
             .await
-            .is_err_and(|err| err.get_code() == UCode::NotFound));
+            .is_err_and(|err| err.code() == UCode::NotFound));
     }
 
     #[test_case(
