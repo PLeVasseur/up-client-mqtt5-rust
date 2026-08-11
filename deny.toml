@@ -39,3 +39,10 @@ skip-tree = [
 [advisories]
 ignore = [
 ]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/PLeVasseur/up-rust.git",
+]

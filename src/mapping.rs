@@ -13,10 +13,10 @@
 
 use std::str::FromStr;
 
-use protobuf::{Enum, EnumOrUnknown, MessageField};
+use bytes::Bytes;
 use up_rust::{
-    UAttributes, UAttributesValidators, UCode, UMessageType, UPayloadFormat, UPriority, UStatus,
-    UUri, UUID,
+    BuilderState, PayloadEncoding, UAttributes, UAttributesValidators, UCode, UMessage,
+    UMessageBuilder, UMessageType, UPriority, UStatus, UUri, UUID,
 };
 
 const CURRENT_UPROTOCOL_MAJOR_VERSION: u8 = 1;
@@ -34,6 +34,16 @@ const KEY_COMMSTATUS: &str = "8";
 const KEY_TOKEN: &str = "10";
 const KEY_TRACEPARENT: &str = "11";
 
+const RETIRED_PAYLOAD_KEYS: [&str; 3] = ["13", "14", "15"];
+
+fn invalid_argument(message: impl Into<String>) -> UStatus {
+    UStatus::fail_with_code(UCode::InvalidArgument, message)
+}
+
+fn missing_required_attribute(name: &str) -> UStatus {
+    invalid_argument(format!("message attributes missing required {name}"))
+}
+
 /// Adds a user property to MQTT properties.
 fn add_user_property(
     properties: &mut paho_mqtt::Properties,
@@ -43,34 +53,148 @@ fn add_user_property(
 ) -> Result<(), UStatus> {
     properties
         .push_string_pair(paho_mqtt::PropertyCode::UserProperty, key, value)
-        .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, format!("{error_message}: {e:?}")))
+        .map_err(|e| UStatus::fail_with_code(UCode::Internal, format!("{error_message}: {e:?}")))
+}
+
+fn configure_common_attributes<S: BuilderState>(
+    builder: &mut UMessageBuilder<S>,
+    id: &UUID,
+    priority: Option<UPriority>,
+    ttl: Option<u32>,
+    traceparent: Option<&str>,
+) {
+    builder.with_message_id(id.clone());
+    if let Some(priority) = priority {
+        builder.with_priority(priority);
+    }
+    if let Some(ttl) = ttl {
+        builder.with_ttl(ttl);
+    }
+    if let Some(traceparent) = traceparent {
+        builder.with_traceparent(traceparent);
+    }
+}
+
+fn finish_message<S: BuilderState>(
+    builder: &mut UMessageBuilder<S>,
+    payload: Option<Bytes>,
+    payload_encoding: Option<PayloadEncoding>,
+) -> Result<UMessage, UStatus> {
+    match (payload, payload_encoding) {
+        (None, None) => builder.build(),
+        (Some(payload), Some(payload_encoding)) => {
+            builder.build_with_payload(payload, payload_encoding)
+        }
+        (Some(_), None) => {
+            return Err(invalid_argument(
+                "message payload has no payload-encoding identifier",
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(invalid_argument(
+                "message declares a payload-encoding identifier without payload bytes",
+            ))
+        }
+    }
+    .map_err(|e| invalid_argument(e.to_string()))
+}
+
+pub(crate) fn create_umessage_from_uattributes(
+    attributes: &UAttributes,
+    payload: Option<Bytes>,
+) -> Result<UMessage, UStatus> {
+    let payload_encoding = attributes.payload_encoding();
+    match attributes.type_() {
+        UMessageType::Publish => {
+            let mut builder = UMessageBuilder::publish(attributes.source().clone());
+            configure_common_attributes(
+                &mut builder,
+                attributes.id(),
+                attributes.priority(),
+                attributes.ttl(),
+                attributes.traceparent(),
+            );
+            finish_message(&mut builder, payload, payload_encoding)
+        }
+        UMessageType::Notification => {
+            let mut builder = UMessageBuilder::notification(
+                attributes.source().clone(),
+                attributes
+                    .sink()
+                    .ok_or_else(|| missing_required_attribute("sink"))?
+                    .clone(),
+            );
+            configure_common_attributes(
+                &mut builder,
+                attributes.id(),
+                attributes.priority(),
+                attributes.ttl(),
+                attributes.traceparent(),
+            );
+            finish_message(&mut builder, payload, payload_encoding)
+        }
+        UMessageType::Request => {
+            let mut builder = UMessageBuilder::request(
+                attributes
+                    .sink()
+                    .ok_or_else(|| missing_required_attribute("sink"))?
+                    .clone(),
+                attributes.source().clone(),
+                attributes
+                    .ttl()
+                    .ok_or_else(|| missing_required_attribute("ttl"))?,
+            );
+            configure_common_attributes(
+                &mut builder,
+                attributes.id(),
+                attributes.priority(),
+                attributes.ttl(),
+                attributes.traceparent(),
+            );
+            if let Some(token) = attributes.token() {
+                builder.with_token(token);
+            }
+            if let Some(permission_level) = attributes.permission_level() {
+                builder.with_permission_level(permission_level);
+            }
+            finish_message(&mut builder, payload, payload_encoding)
+        }
+        UMessageType::Response => {
+            let mut builder = UMessageBuilder::response(
+                attributes
+                    .sink()
+                    .ok_or_else(|| missing_required_attribute("sink"))?
+                    .clone(),
+                attributes
+                    .request_id()
+                    .ok_or_else(|| missing_required_attribute("request id"))?
+                    .clone(),
+                attributes.source().clone(),
+            );
+            configure_common_attributes(
+                &mut builder,
+                attributes.id(),
+                attributes.priority(),
+                attributes.ttl(),
+                attributes.traceparent(),
+            );
+            if let Some(commstatus) = attributes.commstatus() {
+                builder.with_comm_status(commstatus);
+            }
+            finish_message(&mut builder, payload, payload_encoding)
+        }
+    }
 }
 
 #[cfg_attr(test, mockall::automock)]
 pub(crate) trait MessageMapper: Send + Sync {
-    /// Creates MQTT 5 header properties from uProtocol message meta data
-    /// as defined by uProtocol's MQTT5 transport specification.
-    ///
-    /// # Arguments
-    /// * `attributes` - The message meta data.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the given meta data are invalid or cannot
-    /// be mapped to MQTT properties.
+    /// Creates MQTT 5 header properties from uProtocol message metadata.
     fn create_mqtt_properties_from_uattributes(
         &self,
         attributes: &UAttributes,
     ) -> Result<paho_mqtt::Properties, UStatus>;
 
-    /// Creates uProtocol message meta data from MQTT header properties.
-    ///
-    /// # Arguments
-    /// * `props` - MQTT properties to get meta data from.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MQTT header properties cannot be mapped to valid uProtocol message meta data.
+    /// Creates uProtocol message metadata from MQTT header properties.
     fn create_uattributes_from_mqtt_properties(
         &self,
         props: &paho_mqtt::Properties,
@@ -86,29 +210,19 @@ impl MessageMapper for DefaultMessageMapper {
         &self,
         attributes: &UAttributes,
     ) -> Result<paho_mqtt::Properties, UStatus> {
-        // No need to start conversion if attributes are invalid
-        // [impl->dsn~utransport-send-error-invalid-parameter~1]
-        UAttributesValidators::get_validator_for_attributes(attributes)
+        UAttributesValidators::validator_for_attributes(attributes)
             .validate(attributes)
-            .map_err(|e| {
-                UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Invalid uAttributes, err: {e:?}"),
-                )
-            })?;
+            .map_err(|e| invalid_argument(format!("Invalid uAttributes, err: {e:?}")))?;
 
         let mut properties = paho_mqtt::Properties::new();
-
-        // Add uProtocol major version
         add_user_property(
             &mut properties,
             KEY_UPROTOCOL_VERSION,
-            CURRENT_UPROTOCOL_MAJOR_VERSION.to_string().as_str(),
+            &CURRENT_UPROTOCOL_MAJOR_VERSION.to_string(),
             "Failed to add uProtocol major version to MQTT User Properties",
         )?;
 
-        // Add TTL
-        if let Some(ttl) = attributes.ttl {
+        if let Some(ttl) = attributes.ttl() {
             properties
                 .push_u32(
                     paho_mqtt::PropertyCode::MessageExpiryInterval,
@@ -116,19 +230,15 @@ impl MessageMapper for DefaultMessageMapper {
                 )
                 .map_err(|e| {
                     UStatus::fail_with_code(
-                        UCode::INTERNAL,
+                        UCode::Internal,
                         format!("Failed to create Message Expiry Interval property: {e:?}"),
                     )
                 })?;
-
             if ttl % 1000 > 0 {
-                // TTL does not have full second granularity so we need to also add
-                // a dedicated user property to be able to recreate the original
-                // value at the receiving end
                 add_user_property(
                     &mut properties,
                     KEY_TTL,
-                    ttl.to_string().as_str(),
+                    &ttl.to_string(),
                     "Failed to add TTL to MQTT User Properties",
                 )?;
             }
@@ -137,27 +247,23 @@ impl MessageMapper for DefaultMessageMapper {
         add_user_property(
             &mut properties,
             KEY_MESSAGE_ID,
-            &attributes.id.to_hyphenated_string(),
-            "Failed to add message ID to mqtt User Properties",
+            &attributes.id().to_hyphenated_string(),
+            "Failed to add message ID to MQTT User Properties",
         )?;
-
-        if let Ok(message_type) = attributes.type_.enum_value() {
-            add_user_property(
-                &mut properties,
-                KEY_TYPE,
-                &message_type.to_cloudevent_type(),
-                "Failed to add message type to MQTT User Properties",
-            )?;
-        }
-
+        add_user_property(
+            &mut properties,
+            KEY_TYPE,
+            &attributes.type_().to_cloudevent_type(),
+            "Failed to add message type to MQTT User Properties",
+        )?;
         add_user_property(
             &mut properties,
             KEY_SOURCE,
-            &attributes.source.to_uri(false),
+            &attributes.source().to_uri(false),
             "Failed to add message source to MQTT User Properties",
         )?;
 
-        if let Some(sink) = attributes.sink.as_ref() {
+        if let Some(sink) = attributes.sink() {
             add_user_property(
                 &mut properties,
                 KEY_SINK,
@@ -165,23 +271,15 @@ impl MessageMapper for DefaultMessageMapper {
                 "Failed to add message sink to MQTT User Properties",
             )?;
         }
-
-        let prio = attributes.priority.enum_value().map_err(|v| {
-            UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                format!("message has unsupported priority code [{v}]"),
-            )
-        })?;
-        if prio != UPriority::UPRIORITY_UNSPECIFIED {
+        if let Some(priority) = attributes.priority() {
             add_user_property(
                 &mut properties,
                 KEY_PRIORITY,
-                &prio.to_priority_code(),
+                priority.to_priority_code(),
                 "Failed to add message priority to MQTT User Properties",
             )?;
         }
-
-        if let Some(permission_level) = &attributes.permission_level {
+        if let Some(permission_level) = attributes.permission_level() {
             add_user_property(
                 &mut properties,
                 KEY_PERMISSION_LEVEL,
@@ -189,28 +287,25 @@ impl MessageMapper for DefaultMessageMapper {
                 "Failed to add message permission level to MQTT User Properties",
             )?;
         }
-
-        if let Some(comm_status) = &attributes.commstatus {
+        if let Some(commstatus) = attributes.commstatus() {
             add_user_property(
                 &mut properties,
                 KEY_COMMSTATUS,
-                &comm_status.value().to_string(),
+                &commstatus.value().to_string(),
                 "Failed to add message comm status to MQTT User Properties",
             )?;
         }
-
-        if let Some(req_id) = attributes.reqid.as_ref() {
+        if let Some(request_id) = attributes.request_id() {
             properties
-                .push_binary::<Vec<u8>>(paho_mqtt::PropertyCode::CorrelationData, req_id.into())
+                .push_binary::<Vec<u8>>(paho_mqtt::PropertyCode::CorrelationData, request_id.into())
                 .map_err(|e| {
                     UStatus::fail_with_code(
-                        UCode::INTERNAL,
+                        UCode::Internal,
                         format!("Failed to create Correlation Data property: {e:?}"),
                     )
                 })?;
         }
-
-        if let Some(token) = &attributes.token {
+        if let Some(token) = attributes.token() {
             add_user_property(
                 &mut properties,
                 KEY_TOKEN,
@@ -218,8 +313,7 @@ impl MessageMapper for DefaultMessageMapper {
                 "Failed to add message token to MQTT User Properties",
             )?;
         }
-
-        if let Some(traceparent) = &attributes.traceparent {
+        if let Some(traceparent) = attributes.traceparent() {
             add_user_property(
                 &mut properties,
                 KEY_TRACEPARENT,
@@ -228,20 +322,18 @@ impl MessageMapper for DefaultMessageMapper {
             )?;
         }
 
-        if let Ok(format) = attributes.payload_format.enum_value() {
-            if format != UPayloadFormat::UPAYLOAD_FORMAT_UNSPECIFIED {
-                properties
-                    .push_string(
-                        paho_mqtt::PropertyCode::ContentType,
-                        &format.value().to_string(),
+        if let Some(payload_encoding) = attributes.payload_encoding() {
+            properties
+                .push_string(
+                    paho_mqtt::PropertyCode::ContentType,
+                    &payload_encoding.id().to_string(),
+                )
+                .map_err(|e| {
+                    UStatus::fail_with_code(
+                        UCode::Internal,
+                        format!("Failed to create Content Type property: {e:?}"),
                     )
-                    .map_err(|e| {
-                        UStatus::fail_with_code(
-                            UCode::INTERNAL,
-                            format!("Failed to create Content Type property: {e:?}"),
-                        )
-                    })?;
-            }
+                })?;
         }
 
         Ok(properties)
@@ -252,653 +344,540 @@ impl MessageMapper for DefaultMessageMapper {
         &self,
         props: &paho_mqtt::Properties,
     ) -> Result<UAttributes, UStatus> {
-        let uprotocol_major_version = props.find_user_property(KEY_UPROTOCOL_VERSION)
-        .ok_or_else(||UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "MQTT message does not contain uProtocol version identifier"))
-        .and_then(|s| s.parse::<u8>().map_err(|err| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, format!("Failed to map UserProperty {KEY_UPROTOCOL_VERSION} to uProtocol major version: {err}"))))?;
-        if uprotocol_major_version != CURRENT_UPROTOCOL_MAJOR_VERSION {
-            return Err(UStatus::fail_with_code(UCode::INVALID_ARGUMENT, format!("MQTT message contains unsupported uProtocol major version [expected: {CURRENT_UPROTOCOL_MAJOR_VERSION}, found: {uprotocol_major_version}")));
+        for key in RETIRED_PAYLOAD_KEYS {
+            if props.find_user_property(key).is_some() {
+                return Err(invalid_argument(format!(
+                    "MQTT message contains retired payload metadata UserProperty {key}"
+                )));
+            }
         }
 
-        let mut attributes = UAttributes {
-            token: props.find_user_property(KEY_TOKEN),
-            traceparent: props.find_user_property(KEY_TRACEPARENT),
-            ..Default::default()
+        let uprotocol_major_version = props
+            .find_user_property(KEY_UPROTOCOL_VERSION)
+            .ok_or_else(|| {
+                invalid_argument("MQTT message does not contain uProtocol version identifier")
+            })?
+            .parse::<u8>()
+            .map_err(|err| {
+                invalid_argument(format!(
+                    "Failed to map UserProperty {KEY_UPROTOCOL_VERSION} to uProtocol major version: {err}"
+                ))
+            })?;
+        if uprotocol_major_version != CURRENT_UPROTOCOL_MAJOR_VERSION {
+            return Err(invalid_argument(format!(
+                "MQTT message contains unsupported uProtocol major version [expected: {CURRENT_UPROTOCOL_MAJOR_VERSION}, found: {uprotocol_major_version}]"
+            )));
+        }
+
+        let id = props
+            .find_user_property(KEY_MESSAGE_ID)
+            .ok_or_else(|| missing_required_attribute("message id"))
+            .and_then(|value| {
+                UUID::from_str(&value).map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_MESSAGE_ID} to Message ID: {e}"
+                    ))
+                })
+            })?;
+        let message_type = props
+            .find_user_property(KEY_TYPE)
+            .ok_or_else(|| missing_required_attribute("message type"))
+            .and_then(|value| {
+                UMessageType::try_from_cloudevent_type(value).map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_TYPE} to Message Type: {e}"
+                    ))
+                })
+            })?;
+        let source = props
+            .find_user_property(KEY_SOURCE)
+            .ok_or_else(|| missing_required_attribute("source"))
+            .and_then(|value| {
+                UUri::from_str(&value).map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_SOURCE} to Message Source: {e}"
+                    ))
+                })
+            })?;
+        let sink = props
+            .find_user_property(KEY_SINK)
+            .map(|value| {
+                UUri::from_str(&value).map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_SINK} to Message Sink: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let priority = props
+            .find_user_property(KEY_PRIORITY)
+            .map(|value| {
+                UPriority::try_from_priority_code(value).map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_PRIORITY} to Message Priority: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+
+        let ttl = if let Some(value) = props.find_user_property(KEY_TTL) {
+            Some(value.parse::<u32>().map_err(|e| {
+                invalid_argument(format!(
+                    "Failed to map UserProperty {KEY_TTL} to Message TTL: {e}"
+                ))
+            })?)
+        } else {
+            props
+                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
+                .and_then(|property| property.get_u32())
+                .map(|seconds| seconds.saturating_mul(1000))
         };
 
-        if let Some(message_id) = props.find_user_property(KEY_MESSAGE_ID) {
-            let id = UUID::from_str(&message_id).map_err(|e| {
-                UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Failed to map UserProperty {KEY_MESSAGE_ID} to Message ID: {e}"),
-                )
-            })?;
-            attributes.id = MessageField::from(Some(id));
-        }
-
-        if let Some(message_type_str) = props.find_user_property(KEY_TYPE) {
-            attributes.type_ = UMessageType::try_from_cloudevent_type(message_type_str)
-                .map_err(|e| {
-                    UStatus::fail_with_code(
-                        UCode::INVALID_ARGUMENT,
-                        format!("Failed to map UserProperty {KEY_TYPE} to Message Type: {e}"),
-                    )
+        let permission_level = props
+            .find_user_property(KEY_PERMISSION_LEVEL)
+            .map(|value| {
+                value.parse::<u32>().map_err(|e| {
+                    invalid_argument(format!(
+                        "Failed to map UserProperty {KEY_PERMISSION_LEVEL} to Permission Level: {e}"
+                    ))
                 })
-                .map(EnumOrUnknown::from)?;
-        }
-
-        if let Some(source_string) = props.find_user_property(KEY_SOURCE) {
-            attributes.source = UUri::from_str(&source_string)
-                .map_err(|err| {
-                    UStatus::fail_with_code(
-                        UCode::INVALID_ARGUMENT,
-                        format!("fAILED to map UserProperty {KEY_SOURCE} to Message Source: {err}"),
-                    )
-                })
-                .map(MessageField::some)?;
-        }
-
-        if let Some(sink_string) = props.find_user_property(KEY_SINK) {
-            attributes.sink = UUri::from_str(&sink_string)
-                .map_err(|err| {
-                    UStatus::fail_with_code(
-                        UCode::INVALID_ARGUMENT,
-                        format!("Failed to map UserProperty {KEY_SINK} to Message Sink: {err}"),
-                    )
-                })
-                .map(MessageField::some)?;
-        }
-
-        if let Some(priority_string) = props.find_user_property(KEY_PRIORITY) {
-            attributes.priority =
-                UPriority::try_from_priority_code(priority_string)
+            })
+            .transpose()?;
+        let commstatus = props
+            .find_user_property(KEY_COMMSTATUS)
+            .map(|value| {
+                value
+                    .parse::<i32>()
                     .map_err(|e| {
-                        UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Failed to map UserProperty {KEY_PRIORITY} to Message Priority: {e}"),
-                )
+                        invalid_argument(format!(
+                            "Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: {e}"
+                        ))
                     })
-                    .map(EnumOrUnknown::from)?;
+                    .and_then(|value| {
+                        UCode::try_from_i32(value).map_err(|e| {
+                            invalid_argument(format!(
+                                "Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: {e}"
+                            ))
+                        })
+                    })
+            })
+            .transpose()?;
+        let request_id = props
+            .get_binary(paho_mqtt::PropertyCode::CorrelationData)
+            .map(|value| UUID::try_from(value).map_err(|e| invalid_argument(e.to_string())))
+            .transpose()?;
+        let token = props.find_user_property(KEY_TOKEN);
+        let traceparent = props.find_user_property(KEY_TRACEPARENT);
+
+        let content_type_count = props.iter(paho_mqtt::PropertyCode::ContentType).count();
+        if content_type_count > 1 {
+            return Err(invalid_argument(
+                "MQTT message contains duplicate Content Type properties",
+            ));
+        }
+        let payload_encoding = if content_type_count == 0 {
+            None
         } else {
-            // [impl->dsn~up-attributes-priority~1]
-            // it is sufficient to set to UNSPECIFIED because according to the spec,
-            // a message without a (concrete) priority, belongs to class CS1 by default
-            attributes.priority = EnumOrUnknown::from(UPriority::UPRIORITY_UNSPECIFIED);
-        }
-
-        if let Some(ttl_string) = props.find_user_property(KEY_TTL) {
-            // Add the TTL UAttribute from TTL user property if it is set
-            attributes.ttl = Some(ttl_string.parse::<u32>().map_err(|e| {
-                UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Failed to map UserProperty {KEY_TTL} to Message TTL: {e}"),
-                )
-            })?);
-        } else if let Some(message_expiry_interval) = props
-            .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
-            .and_then(|prop| prop.get_u32())
-        {
-            // otherwise, fall back to the MessageExpiryInterval if available
-            attributes.ttl = message_expiry_interval.checked_mul(1000).or(Some(u32::MAX));
-        }
-
-        if let Some(permission_string) = props.find_user_property(KEY_PERMISSION_LEVEL) {
-            attributes.permission_level = permission_string
-            .parse()
-            .map_err(|err| {
-                UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "Failed to map UserProperty {KEY_PERMISSION_LEVEL} to Permission Level: {err}"
-                    ),
-                )
-            })
-            .map(Option::Some)?;
-        }
-
-        if let Some(comm_status_string) = props.find_user_property(KEY_COMMSTATUS) {
-            attributes.commstatus = comm_status_string
-            .parse::<i32>()
-            .map_err(|err| {
-                UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: {err}"),
-                )
-            })
-            .and_then(|v| {
-                UCode::from_i32(v).ok_or_else(||{
-                    UStatus::fail_with_code(
-                        UCode::INVALID_ARGUMENT,
-                        format!("Failed to map UserProperty {KEY_COMMSTATUS} to CommStatus: not a valid UCode [{v}]"),
-                    )
-                })
-            })
-            .map(EnumOrUnknown::from)
-            .map(Option::Some)?;
-        }
-
-        if let Some(req_id) = props.get_binary(paho_mqtt::PropertyCode::CorrelationData) {
-            let uuid = UUID::try_from(req_id)
-                .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
-            attributes.reqid = Some(uuid).into();
-        }
-
-        if let Some(payload_format_string) = props.get_string(paho_mqtt::PropertyCode::ContentType)
-        {
-            attributes.payload_format = payload_format_string
-            .parse::<i32>()
-            .map_err(|err| UStatus::fail_with_code(
-              UCode::INVALID_ARGUMENT,
-              format!("Failed to map Content Type to Message Payload Format: {err}")))
-            .and_then(|v| {
-                UPayloadFormat::from_i32(v).ok_or_else(||UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!("Failed to map Content Type to Message Payload Format: not a valid payload format code [{v}]"),
+            let value = props
+                .get_string(paho_mqtt::PropertyCode::ContentType)
+                .ok_or_else(|| invalid_argument("MQTT Content Type is not a string"))?;
+            let id = value.parse::<u32>().map_err(|e| {
+                invalid_argument(format!(
+                    "Failed to map Content Type to payload-encoding identifier: {e}"
                 ))
-            })
-            .map(EnumOrUnknown::from)?;
+            })?;
+            Some(PayloadEncoding::from_id(id).map_err(|e| {
+                invalid_argument(format!(
+                    "Failed to map Content Type to payload-encoding identifier: {e}"
+                ))
+            })?)
+        };
+
+        if message_type != UMessageType::Request && (token.is_some() || permission_level.is_some())
+        {
+            return Err(invalid_argument(
+                "token and permission level are only valid for request messages",
+            ));
+        }
+        if message_type != UMessageType::Response && (commstatus.is_some() || request_id.is_some())
+        {
+            return Err(invalid_argument(
+                "communication status and request id are only valid for response messages",
+            ));
         }
 
-        // Validate the reconstructed attributes
-        let validator = UAttributesValidators::get_validator_for_attributes(&attributes);
-        validator.validate(&attributes).map_err(|e| {
-            UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                format!("Failed to map message attributes: {e:?}"),
-            )
-        })?;
+        let message = match message_type {
+            UMessageType::Publish => {
+                if sink.is_some() {
+                    return Err(invalid_argument("publish messages must not contain a sink"));
+                }
+                let mut builder = UMessageBuilder::publish(source);
+                configure_common_attributes(
+                    &mut builder,
+                    &id,
+                    priority,
+                    ttl,
+                    traceparent.as_deref(),
+                );
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::new()),
+                    payload_encoding,
+                )
+            }
+            UMessageType::Notification => {
+                let mut builder = UMessageBuilder::notification(
+                    source,
+                    sink.ok_or_else(|| missing_required_attribute("sink"))?,
+                );
+                configure_common_attributes(
+                    &mut builder,
+                    &id,
+                    priority,
+                    ttl,
+                    traceparent.as_deref(),
+                );
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::new()),
+                    payload_encoding,
+                )
+            }
+            UMessageType::Request => {
+                let mut builder = UMessageBuilder::request(
+                    sink.ok_or_else(|| missing_required_attribute("sink"))?,
+                    source,
+                    ttl.ok_or_else(|| missing_required_attribute("ttl"))?,
+                );
+                configure_common_attributes(
+                    &mut builder,
+                    &id,
+                    priority,
+                    ttl,
+                    traceparent.as_deref(),
+                );
+                if let Some(token) = token {
+                    builder.with_token(token);
+                }
+                if let Some(permission_level) = permission_level {
+                    builder.with_permission_level(permission_level);
+                }
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::new()),
+                    payload_encoding,
+                )
+            }
+            UMessageType::Response => {
+                let mut builder = UMessageBuilder::response(
+                    sink.ok_or_else(|| missing_required_attribute("sink"))?,
+                    request_id.ok_or_else(|| missing_required_attribute("request id"))?,
+                    source,
+                );
+                configure_common_attributes(
+                    &mut builder,
+                    &id,
+                    priority,
+                    ttl,
+                    traceparent.as_deref(),
+                );
+                if let Some(commstatus) = commstatus {
+                    builder.with_comm_status(commstatus);
+                }
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::new()),
+                    payload_encoding,
+                )
+            }
+        }?;
 
-        // [impl->dsn~up-attributes-ttl~1]
-        // [impl->dsn~up-attributes-ttl-timeout~1]
-        attributes.check_expired().map_err(|_err| {
-            UStatus::fail_with_code(UCode::DEADLINE_EXCEEDED, "message has expired")
-        })?;
-
+        let attributes = message.attributes().clone();
+        UAttributesValidators::validator_for_attributes(&attributes)
+            .validate(&attributes)
+            .map_err(|e| invalid_argument(format!("Failed to map message attributes: {e:?}")))?;
+        attributes
+            .check_expired()
+            .map_err(|_| UStatus::fail_with_code(UCode::DeadlineExceeded, "message has expired"))?;
         Ok(attributes)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use test_case::test_case;
 
-    use super::*;
+    const EVENT_SOURCE: &str = "//vin.vehicles/A8000/2/8A50";
+    const REPLY_TO: &str = "//vin.vehicles/A8000/2/0";
+    const METHOD: &str = "//vin.vehicles/B8000/3/1B50";
+    const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-    const MSG_TOKEN: &str = "the token";
-    const MSG_TRACEPARENT: &str = "traceparent";
-    const MSG_PERMISSION_LEVEL: u32 = 15;
-
-    // Helper function used to create a UAttributes object and corresponding
-    // MQTT properties object for testing and comparison
-    #[allow(clippy::too_many_arguments)]
-    fn create_test_uattributes_and_properties(
-        major_version: Option<u8>,
-        type_: Option<UMessageType>,
-        id: Option<&UUID>,
-        source: Option<&str>,
-        sink: Option<&str>,
-        priority: Option<UPriority>,
-        ttl: Option<u32>, // milliseconds
-        perm_level: Option<u32>,
-        commstatus: Option<UCode>,
-        reqid: Option<&UUID>,
-        token: Option<&str>,
-        traceparent: Option<&str>,
-        payload_format: Option<UPayloadFormat>,
-    ) -> (UAttributes, paho_mqtt::Properties) {
-        let uattributes = create_uattributes(
-            type_,
-            id,
-            source,
-            sink,
-            priority,
-            ttl,
-            perm_level,
-            commstatus,
-            reqid,
-            token,
-            traceparent,
-            payload_format,
-        );
-
-        let properties = create_mqtt_properties(
-            major_version,
-            type_,
-            id,
-            source,
-            sink,
-            priority,
-            ttl,
-            perm_level,
-            commstatus,
-            reqid,
-            token,
-            traceparent,
-            payload_format,
-        );
-
-        (uattributes, properties)
-    }
-
-    // Helper function to construct UAttributes object for testing.
-    #[allow(clippy::too_many_arguments)]
-    fn create_uattributes(
-        type_: Option<UMessageType>,
-        id: Option<&UUID>,
-        source: Option<&str>,
-        sink: Option<&str>,
-        priority: Option<UPriority>,
-        ttl: Option<u32>, // milliseconds
-        permission_level: Option<u32>,
-        commstatus: Option<UCode>,
-        reqid: Option<&UUID>,
-        token: Option<&str>,
-        traceparent: Option<&str>,
-        payload_format: Option<UPayloadFormat>,
-    ) -> UAttributes {
-        UAttributes {
-            commstatus: commstatus.map(EnumOrUnknown::from),
-            id: id.map(|id| id.to_owned()).into(),
-            payload_format: EnumOrUnknown::from(payload_format.unwrap_or_default()),
-            priority: EnumOrUnknown::from(priority.unwrap_or(UPriority::UPRIORITY_UNSPECIFIED)),
-            permission_level,
-            reqid: reqid.map(|uuid| uuid.to_owned()).into(),
-            source: source
-                .map(|uri| UUri::from_str(uri).expect("expected valid source URI"))
-                .into(),
-            sink: sink
-                .map(|uri| UUri::from_str(uri).expect("expected valid sink URI"))
-                .into(),
-            token: token.map(|s| s.to_owned()),
-            traceparent: traceparent.map(|s| s.to_owned()),
-            ttl,
-            type_: EnumOrUnknown::from(type_.unwrap_or_default()),
-            ..Default::default()
-        }
-    }
-
-    // Helper function to create mqtt properties for testing.
-    #[allow(clippy::too_many_arguments)]
-    fn create_mqtt_properties(
-        major_version: Option<u8>,
-        type_: Option<UMessageType>,
-        id: Option<&UUID>,
-        source: Option<&str>,
-        sink: Option<&str>,
-        priority: Option<UPriority>,
-        ttl: Option<u32>, // milliseconds
-        perm_level: Option<u32>,
-        commstatus: Option<UCode>,
-        reqid: Option<&UUID>,
-        token: Option<&str>,
-        traceparent: Option<&str>,
-        payload_format: Option<UPayloadFormat>,
-    ) -> paho_mqtt::Properties {
-        let mut properties = paho_mqtt::Properties::new();
-
-        if let Some(version) = major_version {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_UPROTOCOL_VERSION,
-                    version.to_string().as_str(),
+    fn build_test_message(
+        message_type: UMessageType,
+        payload_encoding: Option<PayloadEncoding>,
+    ) -> UMessage {
+        let event_source = UUri::from_str(EVENT_SOURCE).expect("event source URI");
+        let reply_to = UUri::from_str(REPLY_TO).expect("reply-to URI");
+        let method = UUri::from_str(METHOD).expect("method URI");
+        let id = UUID::build();
+        match message_type {
+            UMessageType::Publish => {
+                let mut builder = UMessageBuilder::publish(event_source);
+                builder
+                    .with_message_id(id)
+                    .with_priority(UPriority::CS5)
+                    .with_traceparent(TRACEPARENT);
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::from_static(b"payload")),
+                    payload_encoding,
                 )
-                .unwrap();
-        }
-
-        if let Some(type_val) = type_ {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_TYPE,
-                    &type_val.to_cloudevent_type(),
+                .expect("publish")
+            }
+            UMessageType::Notification => {
+                let mut builder = UMessageBuilder::notification(event_source, reply_to);
+                builder.with_message_id(id).with_ttl(2000);
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::from_static(b"payload")),
+                    payload_encoding,
                 )
-                .unwrap();
-        }
-
-        if let Some(id_val) = id {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_MESSAGE_ID,
-                    &id_val.to_hyphenated_string(),
+                .expect("notification")
+            }
+            UMessageType::Request => {
+                let mut builder = UMessageBuilder::request(method, reply_to, 5400);
+                builder
+                    .with_message_id(id)
+                    .with_permission_level(15)
+                    .with_token("token")
+                    .with_traceparent(TRACEPARENT);
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::from_static(b"payload")),
+                    payload_encoding,
                 )
-                .unwrap();
-        }
-
-        if let Some(source_val) = source {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_SOURCE,
-                    source_val,
+                .expect("request")
+            }
+            UMessageType::Response => {
+                let mut builder = UMessageBuilder::response(reply_to, UUID::build(), method);
+                builder
+                    .with_message_id(id)
+                    .with_comm_status(UCode::Unimplemented)
+                    .with_traceparent(TRACEPARENT);
+                finish_message(
+                    &mut builder,
+                    payload_encoding.map(|_| Bytes::from_static(b"payload")),
+                    payload_encoding,
                 )
-                .unwrap();
-        }
-        if let Some(sink_val) = sink {
-            properties
-                .push_string_pair(paho_mqtt::PropertyCode::UserProperty, KEY_SINK, sink_val)
-                .unwrap();
-        }
-        if let Some(priority_val) = priority.filter(|v| *v != UPriority::UPRIORITY_UNSPECIFIED) {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_PRIORITY,
-                    &priority_val.to_priority_code(),
-                )
-                .unwrap();
-        }
-        if let Some(v) = ttl {
-            properties
-                .push_u32(
-                    paho_mqtt::PropertyCode::MessageExpiryInterval,
-                    v.div_ceil(1000),
-                )
-                .unwrap();
-            if v % 1000 > 0 {
-                properties
-                    .push_string_pair(
-                        paho_mqtt::PropertyCode::UserProperty,
-                        KEY_TTL,
-                        &v.to_string(),
-                    )
-                    .unwrap();
+                .expect("response")
             }
         }
-        if let Some(perm_level_val) = perm_level {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_PERMISSION_LEVEL,
-                    &perm_level_val.to_string(),
-                )
-                .unwrap();
-        }
-        if let Some(commstatus_val) = commstatus {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_COMMSTATUS,
-                    &commstatus_val.value().to_string(),
-                )
-                .unwrap();
-        }
-        if let Some(reqid_val) = reqid {
-            properties
-                .push_binary::<Vec<u8>>(paho_mqtt::PropertyCode::CorrelationData, reqid_val.into())
-                .inspect_err(|err| println!("{err}"))
-                .expect("Failed to set Correlation Data property");
-        }
-        if let Some(token_val) = token {
-            properties
-                .push_string_pair(paho_mqtt::PropertyCode::UserProperty, KEY_TOKEN, token_val)
-                .unwrap();
-        }
-        if let Some(traceparent_val) = traceparent {
-            properties
-                .push_string_pair(
-                    paho_mqtt::PropertyCode::UserProperty,
-                    KEY_TRACEPARENT,
-                    traceparent_val,
-                )
-                .unwrap();
-        }
-        if let Some(payload_format_val) = payload_format {
-            properties
-                .push_string(
-                    paho_mqtt::PropertyCode::ContentType,
-                    &payload_format_val.value().to_string(),
-                )
-                .unwrap();
-        }
+    }
 
+    fn minimal_publish_properties(id: &UUID) -> paho_mqtt::Properties {
+        let mut properties = paho_mqtt::Properties::new();
+        add_user_property(&mut properties, KEY_UPROTOCOL_VERSION, "1", "version").unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_MESSAGE_ID,
+            &id.to_hyphenated_string(),
+            "id",
+        )
+        .unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_TYPE,
+            &UMessageType::Publish.to_cloudevent_type(),
+            "type",
+        )
+        .unwrap();
+        add_user_property(&mut properties, KEY_SOURCE, EVENT_SOURCE, "source").unwrap();
         properties
     }
 
-    /// Verifies that two sets of MQTT properties contain the same items.
-    fn assert_mqtt_properties(
-        properties: &paho_mqtt::Properties,
-        expected_properties: &paho_mqtt::Properties,
+    #[test_case(UMessageType::Publish, None; "publish without payload")]
+    #[test_case(UMessageType::Notification, Some(PayloadEncoding::TEXT); "notification text")]
+    #[test_case(UMessageType::Request, Some(PayloadEncoding::RAW); "request raw")]
+    #[test_case(UMessageType::Response, Some(PayloadEncoding::JSON); "response json")]
+    #[test_case(
+        UMessageType::Publish,
+        Some(PayloadEncoding::from_registry_entry(0x1000_0042));
+        "publish private use"
+    )]
+    fn attributes_round_trip(
+        message_type: UMessageType,
+        payload_encoding: Option<PayloadEncoding>,
     ) {
+        let message = build_test_message(message_type, payload_encoding);
+        let mapper = DefaultMessageMapper;
+        let properties = mapper
+            .create_mqtt_properties_from_uattributes(message.attributes())
+            .expect("MQTT properties");
         assert_eq!(
-            properties
-                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
-                .map(|prop| prop.get_u32()),
-            expected_properties
-                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
-                .map(|prop| prop.get_u32())
+            properties.get_string(paho_mqtt::PropertyCode::ContentType),
+            payload_encoding.map(|encoding| encoding.id().to_string())
         );
-        properties.user_iter().for_each(|(key, value)| {
-            assert_eq!(expected_properties.find_user_property(&key), Some(value));
-        });
+        let mapped = mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .expect("uAttributes");
+        assert_eq!(&mapped, message.attributes());
     }
 
-    //
-    // MQTT Properties -> UAttributes
-    //
-
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_PUBLISH),
-            Some(&UUID::build()),
-            Some("//vin.vehicles/A8000/2/8A50"),
-            None,
-            Some(UPriority::UPRIORITY_CS5),
-            None, None, None, None, None, None,
-            Some(UPayloadFormat::UPAYLOAD_FORMAT_TEXT),
-        ),
-        None;
-        "for valid Publish message"
-    )]
-    // [utest->dsn~up-attributes-priority~1]
-    // [utest->dsn~up-attributes-ttl~1]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_NOTIFICATION),
-            Some(&UUID {
-                // timestamp: 1000ms since UNIX epoch
-                msb: 0x0000000010007000_u64,
-                lsb: 0x8010101010101a1a_u64,
-                ..Default::default()
-            }),
-            Some("//vin.vehicles/A8000/2/1A50"),
-            Some("//vin.vehicles/B8000/3/0"),
-            None,
-            // do not expire
-            Some(0),
-            None, None, None, None,
-            Some(MSG_TRACEPARENT),
-            None
-        ),
-        None;
-        "for valid Notification"
-    )]
-    // [utest->dsn~up-attributes-ttl-timeout~1]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_REQUEST),
-            Some(&UUID::build()),
-            Some("//vin.vehicles/A8000/2/0"),
-            Some("//vin.vehicles/B8000/3/1B50"),
-            Some(UPriority::UPRIORITY_CS4),
-            Some(5400),
-            Some(MSG_PERMISSION_LEVEL),
-            None, None,
-            Some(MSG_TOKEN),
-            Some(MSG_TRACEPARENT),
-            Some(UPayloadFormat::UPAYLOAD_FORMAT_RAW)
-        ),
-        None;
-        "for valid Request"
-    )]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_RESPONSE),
-            Some(&UUID::build()),
-            Some("//vin.vehicles/B8000/3/1B50"),
-            Some("//vin.vehicles/A8000/2/0"),
-            Some(UPriority::UPRIORITY_CS4),
-            Some(3000),
-            None,
-            Some(UCode::UNIMPLEMENTED),
-            Some(&UUID::build()),
-            None,
-            Some(MSG_TRACEPARENT),
-            None
-        ),
-        None;
-        "for valid Response"
-    )]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_PUBLISH),
-            Some(&UUID::build()),
-            // source must have resource ID >= 0x8000
-            Some("//vin.vehicles/A8000/2/1A50"),
-            None, None, None, None, None, None, None, None, None
-        ),
-        Some(UCode::INVALID_ARGUMENT);
-        "fails for Publish message with invalid source URI"
-    )]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION + 1),
-            Some(UMessageType::UMESSAGE_TYPE_PUBLISH),
-            Some(&UUID::build()),
-            Some("//vin.vehicles/A8000/2/AA50"),
-            None, None, None, None, None, None, None, None, None
-        ),
-        Some(UCode::INVALID_ARGUMENT);
-        "fails for Publish message with invalid uProtocol version"
-    )]
-    // [utest->dsn~up-attributes-ttl-timeout~1]
-    #[test_case(
-        create_test_uattributes_and_properties(
-            Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-            Some(UMessageType::UMESSAGE_TYPE_PUBLISH),
-            Some(&UUID {
-                // timestamp: 1000ms since UNIX epoch
-                msb: 0x0000000010007000_u64,
-                lsb: 0x8010101010101a1a_u64,
-                ..Default::default()
-            }),
-            Some("//vin.vehicles/A8000/2/AA50"),
-            None,
-            None,
-            // message expiry interval: 12.5s
-            // i.e. this message has expired decades ago
-            Some(12500),
-            None, None, None, None, None, None
-        ),
-        Some(UCode::DEADLINE_EXCEEDED);
-        "fails for expired Publish message"
-    )]
-    // [utest->dsn~up-transport-mqtt5-attributes-mapping~1]
-    fn test_create_uattributes_from_mqtt_properties(
-        (expected_attributes, mqtt_properties): (UAttributes, paho_mqtt::Properties),
-        expected_error_code: Option<UCode>,
-    ) {
+    #[test_case(""; "empty")]
+    #[test_case("text/plain"; "media type")]
+    #[test_case("-1"; "negative")]
+    #[test_case("0"; "reserved zero")]
+    #[test_case("4294967296"; "u32 overflow")]
+    fn malformed_payload_encoding_is_rejected(value: &str) {
         let mapper = DefaultMessageMapper;
-        let attributes_result = mapper.create_uattributes_from_mqtt_properties(&mqtt_properties);
-        if let Some(code) = expected_error_code {
-            assert!(attributes_result.is_err_and(|err| err.get_code() == code))
-        } else {
-            assert!(attributes_result.is_ok_and(|attribs| attribs == expected_attributes));
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_string(paho_mqtt::PropertyCode::ContentType, value)
+            .unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn duplicate_payload_encoding_is_rejected() {
+        let mapper = DefaultMessageMapper;
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_string(paho_mqtt::PropertyCode::ContentType, "7")
+            .unwrap();
+        properties
+            .push_string(paho_mqtt::PropertyCode::ContentType, "6")
+            .unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test_case("13")]
+    #[test_case("14")]
+    #[test_case("15")]
+    fn retired_payload_metadata_is_rejected(key: &str) {
+        let mapper = DefaultMessageMapper;
+        let mut properties = minimal_publish_properties(&UUID::build());
+        add_user_property(&mut properties, key, "legacy", "legacy").unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn arbitrary_nonzero_registry_id_round_trips() {
+        let mapper = DefaultMessageMapper;
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_string(paho_mqtt::PropertyCode::ContentType, "66")
+            .unwrap();
+        let attributes = mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .expect("unknown nonzero identifiers remain representable");
+        assert_eq!(
+            attributes.payload_encoding(),
+            Some(PayloadEncoding::from_registry_entry(66))
+        );
+    }
+
+    #[test]
+    fn permanently_assigned_registry_ids_round_trip() {
+        let mapper = DefaultMessageMapper;
+        for encoding in [
+            PayloadEncoding::PROTOBUF_WRAPPED_IN_ANY,
+            PayloadEncoding::PROTOBUF,
+            PayloadEncoding::JSON,
+            PayloadEncoding::SOMEIP,
+            PayloadEncoding::SOMEIP_TLV,
+            PayloadEncoding::RAW,
+            PayloadEncoding::TEXT,
+            PayloadEncoding::SHM,
+        ] {
+            let mut properties = minimal_publish_properties(&UUID::build());
+            properties
+                .push_string(
+                    paho_mqtt::PropertyCode::ContentType,
+                    &encoding.id().to_string(),
+                )
+                .unwrap();
+            let attributes = mapper
+                .create_uattributes_from_mqtt_properties(&properties)
+                .expect("registered payload encoding");
+            assert_eq!(attributes.payload_encoding(), Some(encoding));
+            let remapped = mapper
+                .create_mqtt_properties_from_uattributes(&attributes)
+                .expect("remapped properties");
+            assert_eq!(
+                remapped.get_string(paho_mqtt::PropertyCode::ContentType),
+                Some(encoding.id().to_string())
+            );
         }
     }
 
-    //
-    // UAttributes -> MQTT Properties
-    //
-
     #[test]
-    // [utest->dsn~up-transport-mqtt5-attributes-mapping~1]
-    fn test_create_properties_from_invalid_attributes_fails() {
-        let invalid_attributes = UAttributes {
-            type_: EnumOrUnknown::from(UMessageType::UMESSAGE_TYPE_PUBLISH),
-            // Publish message must have source field
-            source: MessageField::none(),
-            ..Default::default()
-        };
-        let mapper = DefaultMessageMapper;
-        assert!(mapper
-            .create_mqtt_properties_from_uattributes(&invalid_attributes)
-            .is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));
+    fn payload_presence_matches_encoding_presence() {
+        let encoded = build_test_message(UMessageType::Publish, Some(PayloadEncoding::TEXT));
+        let empty = create_umessage_from_uattributes(encoded.attributes(), Some(Bytes::new()))
+            .expect("present empty payload");
+        assert_eq!(empty.payload(), Some(Bytes::new()));
+        assert_eq!(empty.payload_encoding(), Some(PayloadEncoding::TEXT));
+        assert!(create_umessage_from_uattributes(encoded.attributes(), None).is_err());
+
+        let unencoded = build_test_message(UMessageType::Publish, None);
+        assert!(create_umessage_from_uattributes(unencoded.attributes(), None).is_ok());
+        assert!(create_umessage_from_uattributes(
+            unencoded.attributes(),
+            Some(Bytes::from_static(b"payload"))
+        )
+        .is_err());
     }
 
-    #[test_case(create_test_uattributes_and_properties(
-        Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-        Some(UMessageType::UMESSAGE_TYPE_PUBLISH),
-        Some(&UUID::build()),
-        Some("/A10D/4/B3AA"),
-        None,
-        Some(UPriority::UPRIORITY_CS5),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
-    );"for Publish message")]
-    #[test_case(create_test_uattributes_and_properties(
-        Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-        Some(UMessageType::UMESSAGE_TYPE_NOTIFICATION),
-        Some(&UUID::build()),
-        Some("/A10D/4/B3AA"),
-        Some("/103/2/0"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(MSG_TRACEPARENT),
-        None,
-        None
-    );"for Notification message")]
-    #[test_case(create_test_uattributes_and_properties(
-        Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-        Some(UMessageType::UMESSAGE_TYPE_REQUEST),
-        Some(&UUID::build()),
-        Some("/A10D/4/0"),
-        Some("/103/2/71A3"),
-        Some(UPriority::UPRIORITY_CS4),
-        Some(2000),
-        Some(MSG_PERMISSION_LEVEL),
-        None,
-        None,
-        Some(MSG_TOKEN),
-        Some(MSG_TRACEPARENT),
-        Some(UPayloadFormat::UPAYLOAD_FORMAT_RAW)
-    );"for RPC Request message")]
-    #[test_case(create_test_uattributes_and_properties(
-        Some(CURRENT_UPROTOCOL_MAJOR_VERSION),
-        Some(UMessageType::UMESSAGE_TYPE_RESPONSE),
-        Some(&UUID::build()),
-        Some("/103/2/71A3"),
-        Some("/A10D/4/0"),
-        Some(UPriority::UPRIORITY_CS4),
-        Some(4150),
-        None,
-        Some(UCode::UNIMPLEMENTED),
-        Some(&UUID::build()),
-        None,
-        Some(MSG_TRACEPARENT),
-        None
-    );"for RPC Response message")]
-    // [utest->dsn~up-transport-mqtt5-attributes-mapping~1]
-    fn test_create_mqtt_properties_from_uattributes(
-        (attributes, expected_mqtt_properties): (UAttributes, paho_mqtt::Properties),
-    ) {
+    #[test]
+    fn unsupported_uprotocol_version_is_rejected() {
         let mapper = DefaultMessageMapper;
-        let mqtt_properties = mapper
-            .create_mqtt_properties_from_uattributes(&attributes)
-            .expect("failed to create MQTT properties from message attributes");
-        assert_mqtt_properties(&mqtt_properties, &expected_mqtt_properties);
+        let mut properties = paho_mqtt::Properties::new();
+        add_user_property(&mut properties, KEY_UPROTOCOL_VERSION, "2", "version").unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn invalid_source_is_rejected() {
+        let mapper = DefaultMessageMapper;
+        let mut properties = paho_mqtt::Properties::new();
+        add_user_property(&mut properties, KEY_UPROTOCOL_VERSION, "1", "version").unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_MESSAGE_ID,
+            &UUID::build().to_hyphenated_string(),
+            "id",
+        )
+        .unwrap();
+        add_user_property(
+            &mut properties,
+            KEY_TYPE,
+            &UMessageType::Publish.to_cloudevent_type(),
+            "type",
+        )
+        .unwrap();
+        add_user_property(&mut properties, KEY_SOURCE, "not a URI", "source").unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn expired_message_is_rejected() {
+        let mapper = DefaultMessageMapper;
+        let expired_id = UUID::from_u64_pair(0x0000_0000_1000_7000, 0x8010_1010_1010_1a1a).unwrap();
+        let mut properties = minimal_publish_properties(&expired_id);
+        add_user_property(&mut properties, KEY_TTL, "12500", "ttl").unwrap();
+        assert!(mapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::DeadlineExceeded));
     }
 }

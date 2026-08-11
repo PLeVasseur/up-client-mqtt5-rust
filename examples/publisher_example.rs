@@ -16,7 +16,7 @@ use std::{str::FromStr, time::SystemTime};
 use backon::{ExponentialBuilder, Retryable};
 use clap::Parser;
 use log::{error, info};
-use up_rust::{UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri};
+use up_rust::{PayloadEncoding, UMessageBuilder, UStatus, UTransport, UUri};
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
 /// Publishes messages to a given topic using the MQTT 5 transport.
@@ -36,7 +36,7 @@ async fn main() -> Result<(), UStatus> {
     env_logger::init();
 
     let command = Command::parse();
-    let authority = command.topic.authority_name.clone();
+    let authority = command.topic.authority_name().to_string();
 
     let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
@@ -58,10 +58,7 @@ async fn main() -> Result<(), UStatus> {
             .as_secs();
         let message = UMessageBuilder::publish(command.topic.clone())
             .with_ttl(1000)
-            .build_with_payload(
-                current_time.to_string(),
-                UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-            )
+            .build_with_payload(current_time.to_string(), PayloadEncoding::TEXT)
             .expect("Failed to build message");
 
         if let Err(e) = client.send(message).await {
