@@ -150,6 +150,7 @@ jobs:
       - name: Install cargo-hack
         env:
           CARGO_HACK_VERSION: "v0.6.45"
+          GH_TOKEN: ${{ github.token }}
         run: |
           # See https://github.com/taiki-e/cargo-hack#from-prebuilt-binaries
           # Get host target.
