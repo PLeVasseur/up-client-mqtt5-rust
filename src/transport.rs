@@ -191,11 +191,11 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Notification,
-            "/A8000/2/1A50",
+            "/A8000/2/8A50",
             Some("//vin.vehicles/B8000/3/0"),
             "payload",
         ),
-        "vin.vehicles/8000/A/2/1A50/vin.vehicles/8000/B/3/0",
+        "vin.vehicles/8000/A/2/8A50/vin.vehicles/8000/B/3/0",
         None,
         None;
         "succeeds for Notification message"

@@ -222,7 +222,7 @@ impl MessageMapper for DefaultMessageMapper {
             "Failed to add uProtocol major version to MQTT User Properties",
         )?;
 
-        if let Some(ttl) = attributes.ttl() {
+        if let Some(ttl) = attributes.ttl().filter(|ttl| *ttl != 0) {
             properties
                 .push_u32(
                     paho_mqtt::PropertyCode::MessageExpiryInterval,
@@ -234,14 +234,14 @@ impl MessageMapper for DefaultMessageMapper {
                         format!("Failed to create Message Expiry Interval property: {e:?}"),
                     )
                 })?;
-            if ttl % 1000 > 0 {
-                add_user_property(
-                    &mut properties,
-                    KEY_TTL,
-                    &ttl.to_string(),
-                    "Failed to add TTL to MQTT User Properties",
-                )?;
-            }
+            // Brokers decrement the seconds property. Preserve the original
+            // lifetime independently, including whole-second TTLs.
+            add_user_property(
+                &mut properties,
+                KEY_TTL,
+                &ttl.to_string(),
+                "Failed to add TTL to MQTT User Properties",
+            )?;
         }
 
         add_user_property(
@@ -420,17 +420,43 @@ impl MessageMapper for DefaultMessageMapper {
             })
             .transpose()?;
 
+        let remaining_seconds = props
+            .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
+            .map(|property| {
+                property.get_u32().ok_or_else(|| {
+                    invalid_argument("MQTT Message Expiry Interval is not an unsigned integer")
+                })
+            })
+            .transpose()?;
+        if remaining_seconds == Some(0) {
+            return Err(UStatus::fail_with_code(
+                UCode::DeadlineExceeded,
+                "MQTT message expiry interval is zero",
+            ));
+        }
         let ttl = if let Some(value) = props.find_user_property(KEY_TTL) {
-            Some(value.parse::<u32>().map_err(|e| {
+            let original = value.parse::<u32>().map_err(|e| {
                 invalid_argument(format!(
                     "Failed to map UserProperty {KEY_TTL} to Message TTL: {e}"
                 ))
-            })?)
+            })?;
+            if original == 0 && remaining_seconds.is_some() {
+                return Err(invalid_argument(
+                    "zero original TTL contradicts finite MQTT expiry",
+                ));
+            }
+            (original != 0).then_some(original)
         } else {
-            props
-                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
-                .and_then(|property| property.get_u32())
-                .map(|seconds| seconds.saturating_mul(1000))
+            // Legacy senders may omit the original TTL. The broker's remaining
+            // seconds give only a conservative bound relative to the original ID;
+            // never claim to recover the original lifetime or saturate overflow.
+            remaining_seconds
+                .map(|seconds| {
+                    seconds.checked_mul(1000).ok_or_else(|| {
+                        invalid_argument("MQTT expiry exceeds the uProtocol millisecond TTL range")
+                    })
+                })
+                .transpose()?
         };
 
         let permission_level = props
@@ -702,7 +728,7 @@ mod tests {
     #[test_case(UMessageType::Response, Some(PayloadEncoding::JSON); "response json")]
     #[test_case(
         UMessageType::Publish,
-        Some(PayloadEncoding::from_registry_entry(0x1000_0042));
+        Some(PayloadEncoding::from_registry_entry(0xF042));
         "publish private use"
     )]
     fn attributes_round_trip(
@@ -727,7 +753,7 @@ mod tests {
     #[test_case(""; "empty")]
     #[test_case("text/plain"; "media type")]
     #[test_case("-1"; "negative")]
-    #[test_case("0"; "reserved zero")]
+    #[test_case("65536"; "above 16 bit range")]
     #[test_case("4294967296"; "u32 overflow")]
     fn malformed_payload_encoding_is_rejected(value: &str) {
         let mapper = DefaultMessageMapper;
@@ -767,54 +793,150 @@ mod tests {
             .is_err_and(|error| error.code() == UCode::InvalidArgument));
     }
 
-    #[test]
-    fn arbitrary_nonzero_registry_id_round_trips() {
+    #[test_case(0; "contract defined zero")]
+    #[test_case(1; "protobuf Any")]
+    #[test_case(2; "protobuf")]
+    #[test_case(3; "JSON")]
+    #[test_case(4; "SOMEIP")]
+    #[test_case(5; "SOMEIP TLV")]
+    #[test_case(6; "raw")]
+    #[test_case(7; "text")]
+    #[test_case(8; "retired SHM number remains opaque")]
+    #[test_case(66; "unassigned")]
+    #[test_case(0xE000; "reserved")]
+    #[test_case(0xFFFF; "private maximum")]
+    fn encoding_identifiers_round_trip(id: u32) {
         let mapper = DefaultMessageMapper;
+        let encoding = PayloadEncoding::from_id(id).unwrap();
         let mut properties = minimal_publish_properties(&UUID::build());
         properties
-            .push_string(paho_mqtt::PropertyCode::ContentType, "66")
+            .push_string(
+                paho_mqtt::PropertyCode::ContentType,
+                &encoding.id().to_string(),
+            )
             .unwrap();
         let attributes = mapper
             .create_uattributes_from_mqtt_properties(&properties)
-            .expect("unknown nonzero identifiers remain representable");
+            .expect("registered payload encoding");
+        assert_eq!(attributes.payload_encoding(), Some(encoding));
+        let remapped = mapper
+            .create_mqtt_properties_from_uattributes(&attributes)
+            .expect("remapped properties");
         assert_eq!(
-            attributes.payload_encoding(),
-            Some(PayloadEncoding::from_registry_entry(66))
+            remapped.get_string(paho_mqtt::PropertyCode::ContentType),
+            Some(encoding.id().to_string())
+        );
+    }
+
+    #[test_case(None, None, None; "no expiry")]
+    #[test_case(Some(0), None, None; "explicit zero omits both properties")]
+    #[test_case(Some(1), Some(1), Some("1"); "one millisecond rounds up")]
+    #[test_case(Some(1000), Some(1), Some("1000"); "whole second retains original")]
+    #[test_case(Some(1001), Some(2), Some("1001"); "fractional second retains original")]
+    #[test_case(Some(u32::MAX), Some(4_294_968), Some("4294967295"); "maximum TTL stays exact")]
+    fn outgoing_ttl_properties_preserve_original_lifetime(
+        ttl: Option<u32>,
+        seconds: Option<u32>,
+        exact: Option<&str>,
+    ) {
+        let mut builder = UMessageBuilder::publish(UUri::from_str(EVENT_SOURCE).unwrap());
+        if let Some(ttl) = ttl {
+            builder.with_ttl(ttl);
+        }
+        let message = builder.build().unwrap();
+        let properties = DefaultMessageMapper
+            .create_mqtt_properties_from_uattributes(message.attributes())
+            .unwrap();
+        assert_eq!(
+            properties
+                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
+                .and_then(|p| p.get_u32()),
+            seconds
+        );
+        assert_eq!(properties.find_user_property(KEY_TTL).as_deref(), exact);
+    }
+
+    #[test_case(30_000; "whole second original TTL")]
+    #[test_case(30_001; "fractional second original TTL")]
+    fn broker_decrement_does_not_age_original_ttl_twice(ttl: u32) {
+        let (msb, lsb) = UUID::build().as_u64_pair();
+        let id = UUID::from_u64_pair(msb - (16_000 << 16), lsb).unwrap();
+        let message = UMessageBuilder::publish(UUri::from_str(EVENT_SOURCE).unwrap())
+            .with_message_id(id.clone())
+            .with_ttl(ttl)
+            .build()
+            .unwrap();
+        let outgoing = DefaultMessageMapper
+            .create_mqtt_properties_from_uattributes(message.attributes())
+            .unwrap();
+        let original = outgoing
+            .find_user_property(KEY_TTL)
+            .expect("sender retains original TTL");
+        let mut delivered = minimal_publish_properties(&id);
+        delivered
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, 15)
+            .unwrap();
+        add_user_property(&mut delivered, KEY_TTL, &original, "original TTL").unwrap();
+        let attributes = DefaultMessageMapper
+            .create_uattributes_from_mqtt_properties(&delivered)
+            .unwrap();
+        assert_eq!(attributes.ttl(), Some(ttl));
+    }
+
+    #[test_case(None; "legacy zero expiry")]
+    #[test_case(Some("0"); "zero expiry and zero original")]
+    #[test_case(Some("30000"); "zero expiry cannot be overridden by original TTL")]
+    fn received_zero_expiry_is_expired(original: Option<&str>) {
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, 0)
+            .unwrap();
+        if let Some(original) = original {
+            add_user_property(&mut properties, KEY_TTL, original, "TTL").unwrap();
+        }
+        assert!(DefaultMessageMapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::DeadlineExceeded));
+    }
+
+    #[test_case(4_294_968; "millisecond overflow boundary")]
+    #[test_case(u32::MAX; "maximum MQTT seconds")]
+    fn legacy_expiry_overflow_is_rejected(seconds: u32) {
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, seconds)
+            .unwrap();
+        assert!(DefaultMessageMapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
+    }
+
+    #[test]
+    fn exact_maximum_ttl_needs_no_lossy_seconds_conversion() {
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, 4_294_968)
+            .unwrap();
+        add_user_property(&mut properties, KEY_TTL, &u32::MAX.to_string(), "TTL").unwrap();
+        assert_eq!(
+            DefaultMessageMapper
+                .create_uattributes_from_mqtt_properties(&properties)
+                .unwrap()
+                .ttl(),
+            Some(u32::MAX)
         );
     }
 
     #[test]
-    fn permanently_assigned_registry_ids_round_trip() {
-        let mapper = DefaultMessageMapper;
-        for encoding in [
-            PayloadEncoding::PROTOBUF_WRAPPED_IN_ANY,
-            PayloadEncoding::PROTOBUF,
-            PayloadEncoding::JSON,
-            PayloadEncoding::SOMEIP,
-            PayloadEncoding::SOMEIP_TLV,
-            PayloadEncoding::RAW,
-            PayloadEncoding::TEXT,
-            PayloadEncoding::SHM,
-        ] {
-            let mut properties = minimal_publish_properties(&UUID::build());
-            properties
-                .push_string(
-                    paho_mqtt::PropertyCode::ContentType,
-                    &encoding.id().to_string(),
-                )
-                .unwrap();
-            let attributes = mapper
-                .create_uattributes_from_mqtt_properties(&properties)
-                .expect("registered payload encoding");
-            assert_eq!(attributes.payload_encoding(), Some(encoding));
-            let remapped = mapper
-                .create_mqtt_properties_from_uattributes(&attributes)
-                .expect("remapped properties");
-            assert_eq!(
-                remapped.get_string(paho_mqtt::PropertyCode::ContentType),
-                Some(encoding.id().to_string())
-            );
-        }
+    fn zero_original_ttl_cannot_discard_finite_broker_expiry() {
+        let mut properties = minimal_publish_properties(&UUID::build());
+        properties
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, 1)
+            .unwrap();
+        add_user_property(&mut properties, KEY_TTL, "0", "TTL").unwrap();
+        assert!(DefaultMessageMapper
+            .create_uattributes_from_mqtt_properties(&properties)
+            .is_err_and(|error| error.code() == UCode::InvalidArgument));
     }
 
     #[test]
