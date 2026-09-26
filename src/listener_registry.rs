@@ -128,7 +128,7 @@ impl RegisteredListeners {
     ///
     /// # Errors
     ///
-    /// Returns an error with `UCode::RESOURCE_EXHAUSTED` if the maximum number of topic filters
+    /// Returns an error with `UCode::ResourceExhausted` if the maximum number of topic filters
     /// or the maximum number of listeners per topic filter has already been reached.
     pub(crate) fn add_listener(
         &mut self,
@@ -147,7 +147,7 @@ impl RegisteredListeners {
             // [impl->dsn~utransport-registerlistener-error-resource-exhausted~1]
             if listeners.len() >= self.max_listeners_per_subscription {
                 return Err(UStatus::fail_with_code(
-                    UCode::RESOURCE_EXHAUSTED,
+                    UCode::ResourceExhausted,
                     "Maximum number of listeners per topic filter has been reached",
                 ));
             }
@@ -168,7 +168,7 @@ impl RegisteredListeners {
             // [impl->dsn~utransport-registerlistener-error-resource-exhausted~1]
             if self.subscriptions_by_id.len() == self.subscriptions_by_id.capacity() {
                 return Err(UStatus::fail_with_code(
-                    UCode::RESOURCE_EXHAUSTED,
+                    UCode::ResourceExhausted,
                     "Max number of subscriptions reached",
                 ));
             }
@@ -431,13 +431,13 @@ mod tests {
         // [utest->dsn~utransport-registerlistener-error-resource-exhausted~1]
         assert!(registered_listeners
                 .add_listener(topic_filter_1, listener_2.clone())
-                .is_err_and(|err| err.get_code() == UCode::RESOURCE_EXHAUSTED),
+                .is_err_and(|err| err.code() == UCode::ResourceExhausted),
             "It should not have been possible to register another listener for the same topic filter"
         );
         assert!(
             registered_listeners
                 .add_listener(topic_filter_2, listener_2.clone())
-                .is_err_and(|err| err.get_code() == UCode::RESOURCE_EXHAUSTED),
+                .is_err_and(|err| err.code() == UCode::ResourceExhausted),
             "It should not have been possible to register a listener for another topic filter"
         );
     }

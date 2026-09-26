@@ -8,7 +8,7 @@ Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-up-rust = { version = "0.9" }
+up-rust = { version = "0.10" }
 up-transport-mqtt5 = { version = "0.4" }
 ```
 
