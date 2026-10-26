@@ -75,6 +75,8 @@ fn configure_common_attributes<S: BuilderState>(
     }
 }
 
+// Reconstruct received bytes with their exact declared identity. Originating
+// builders apply producer policy; the received-declaration path preserves opaque IDs.
 fn finish_message<S: BuilderState>(
     builder: &mut UMessageBuilder<S>,
     payload: Option<Bytes>,
@@ -82,9 +84,9 @@ fn finish_message<S: BuilderState>(
 ) -> Result<UMessage, UStatus> {
     match (payload, payload_encoding) {
         (None, None) => builder.build(),
-        (Some(payload), Some(payload_encoding)) => {
-            builder.build_with_payload(payload, payload_encoding)
-        }
+        (Some(payload), Some(payload_encoding)) => builder
+            .build_with_payload(payload, PayloadEncoding::RAW)
+            .and_then(|message| message.with_declared_payload_encoding(payload_encoding)),
         (Some(_), None) => {
             return Err(invalid_argument(
                 "message payload has no payload-encoding identifier",
@@ -103,87 +105,11 @@ pub(crate) fn create_umessage_from_uattributes(
     attributes: &UAttributes,
     payload: Option<Bytes>,
 ) -> Result<UMessage, UStatus> {
-    let payload_encoding = attributes.payload_encoding();
-    match attributes.type_() {
-        UMessageType::Publish => {
-            let mut builder = UMessageBuilder::publish(attributes.source().clone());
-            configure_common_attributes(
-                &mut builder,
-                attributes.id(),
-                attributes.priority(),
-                attributes.ttl(),
-                attributes.traceparent(),
-            );
-            finish_message(&mut builder, payload, payload_encoding)
-        }
-        UMessageType::Notification => {
-            let mut builder = UMessageBuilder::notification(
-                attributes.source().clone(),
-                attributes
-                    .sink()
-                    .ok_or_else(|| missing_required_attribute("sink"))?
-                    .clone(),
-            );
-            configure_common_attributes(
-                &mut builder,
-                attributes.id(),
-                attributes.priority(),
-                attributes.ttl(),
-                attributes.traceparent(),
-            );
-            finish_message(&mut builder, payload, payload_encoding)
-        }
-        UMessageType::Request => {
-            let mut builder = UMessageBuilder::request(
-                attributes
-                    .sink()
-                    .ok_or_else(|| missing_required_attribute("sink"))?
-                    .clone(),
-                attributes.source().clone(),
-                attributes
-                    .ttl()
-                    .ok_or_else(|| missing_required_attribute("ttl"))?,
-            );
-            configure_common_attributes(
-                &mut builder,
-                attributes.id(),
-                attributes.priority(),
-                attributes.ttl(),
-                attributes.traceparent(),
-            );
-            if let Some(token) = attributes.token() {
-                builder.with_token(token);
-            }
-            if let Some(permission_level) = attributes.permission_level() {
-                builder.with_permission_level(permission_level);
-            }
-            finish_message(&mut builder, payload, payload_encoding)
-        }
-        UMessageType::Response => {
-            let mut builder = UMessageBuilder::response(
-                attributes
-                    .sink()
-                    .ok_or_else(|| missing_required_attribute("sink"))?
-                    .clone(),
-                attributes
-                    .request_id()
-                    .ok_or_else(|| missing_required_attribute("request id"))?
-                    .clone(),
-                attributes.source().clone(),
-            );
-            configure_common_attributes(
-                &mut builder,
-                attributes.id(),
-                attributes.priority(),
-                attributes.ttl(),
-                attributes.traceparent(),
-            );
-            if let Some(commstatus) = attributes.commstatus() {
-                builder.with_comm_status(commstatus);
-            }
-            finish_message(&mut builder, payload, payload_encoding)
-        }
-    }
+    let metadata = attributes
+        .try_project_to_frame_metadata()
+        .map_err(|error| invalid_argument(error.to_string()))?;
+    up_rust::frame::metadata::try_project_frame_to_umessage(metadata, payload)
+        .map_err(|error| invalid_argument(error.to_string()))
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -194,7 +120,8 @@ pub(crate) trait MessageMapper: Send + Sync {
         attributes: &UAttributes,
     ) -> Result<paho_mqtt::Properties, UStatus>;
 
-    /// Creates uProtocol message metadata from MQTT header properties.
+    /// Creates uProtocol message metadata from MQTT header properties, preserving
+    /// structurally valid opaque encoding IDs independently of producer-only rules.
     fn create_uattributes_from_mqtt_properties(
         &self,
         props: &paho_mqtt::Properties,
@@ -819,6 +746,11 @@ mod tests {
             .create_uattributes_from_mqtt_properties(&properties)
             .expect("registered payload encoding");
         assert_eq!(attributes.payload_encoding(), Some(encoding));
+        let bytes = Bytes::from_static(b"\xff\x00opaque");
+        let message = create_umessage_from_uattributes(&attributes, Some(bytes.clone()))
+            .expect("received opaque message");
+        assert_eq!(message.attributes().payload_encoding(), Some(encoding));
+        assert_eq!(message.payload(), Some(bytes));
         let remapped = mapper
             .create_mqtt_properties_from_uattributes(&attributes)
             .expect("remapped properties");

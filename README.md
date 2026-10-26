@@ -7,6 +7,10 @@ This library provides a Rust based implementation of the [MQTT 5 uProtocol Trans
 The [transport contract guide](docs/transport-contract.md) describes configuration,
 opaque payload identity and TTL carriage. Public documentation is enforced with
 `missing_docs = "deny"` and warning-denied Rustdoc/doctests.
+Received encoding identifiers and opaque payload bytes are preserved, including
+reserved values. Reconstruction uses the SDK received-declaration and checked
+projection APIs; producer-only encoding restrictions are enforced when originating
+messages, rather than when relaying received data.
 
 Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 

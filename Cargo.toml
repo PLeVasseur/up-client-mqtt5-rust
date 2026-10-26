@@ -56,7 +56,7 @@ tokio = { version = "1.53.1", default-features = false, features = [
     "sync",
 ] }
 tracing = { version = "0.1", default-features = false }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "cae0c55d19098a498ac6629d94c4cbcede66caae", default-features = false }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "c9be9db4565b43f463734f3a335ea4902cb46a62", default-features = false }
 
 [build-dependencies]
 testcontainers = { version = "0.28.0", default-features = false, features = ["blocking"] }
@@ -81,7 +81,7 @@ tokio = { version = "1.53.1", default-features = false, features = [
 ] }
 tracing = { version = "0.1", default-features = false, features = ["log", "std"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "cae0c55d19098a498ac6629d94c4cbcede66caae", default-features = false, features = ["test-util"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "c9be9db4565b43f463734f3a335ea4902cb46a62", default-features = false, features = ["test-util"] }
 
 [[example]]
 name = "publisher_example"
