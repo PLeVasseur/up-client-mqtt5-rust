@@ -731,7 +731,8 @@ mod tests {
     #[test_case(8; "retired SHM number remains opaque")]
     #[test_case(66; "unassigned")]
     #[test_case(0xE000; "reserved")]
-    #[test_case(0xFFFF; "private maximum")]
+    #[test_case(0xFFFE; "last private ID")]
+    #[test_case(0xFFFF; "future reserved ID remains opaque")]
     fn encoding_identifiers_round_trip(id: u32) {
         let mapper = DefaultMessageMapper;
         let encoding = PayloadEncoding::from_id(id).unwrap();
