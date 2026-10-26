@@ -11,23 +11,33 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 //! Detect Docker-backed broker availability for the transport's integration tests.
-use testcontainers::{runners::SyncRunner, GenericImage};
+use std::process::Command;
 
-/// Enables the integration-test configuration when the Mosquitto image can be pulled.
+/// Enables broker tests when the selected Docker daemon has the prepared image.
+///
+/// This check never pulls an image. Set `UP_MQTT5_REQUIRE_BROKER=1` in acceptance
+/// runs to fail the build if the daemon/image is unavailable rather than omit tests.
 pub fn main() {
-    // Try to pull the Mosquitto MQTT broker container image which will be needed to
-    // run integration tests.
-    if let Err(err) = GenericImage::new("eclipse-mosquitto", "2.0").pull_image() {
-        eprintln!("Docker is not available on build platform: {err}");
-    } else {
-        // Tests using #[cfg(docker_available)] will only be compiled (and run)
-        // if Docker is actually available on the platform (as determined by the
-        // testcontainers crate).
-        eprintln!("Docker is available on build platform");
+    let required = match std::env::var("UP_MQTT5_REQUIRE_BROKER") {
+        Ok(value) if value == "1" => true,
+        Ok(value) if value == "0" => false,
+        Err(std::env::VarError::NotPresent) => false,
+        _ => panic!("UP_MQTT5_REQUIRE_BROKER must be 0 or 1"),
+    };
+    let available = Command::new("docker")
+        .args(["image", "inspect", "eclipse-mosquitto:2.0"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if available {
         println!("cargo::rustc-cfg=docker_available");
+    } else if required {
+        panic!("broker acceptance requires Docker and the prepared eclipse-mosquitto:2.0 image");
+    } else {
+        println!(
+            "cargo::warning=broker tests require Docker and a prepared eclipse-mosquitto:2.0 image"
+        );
     }
-    // we should only need to determine once, if Docker is available
-    // triggering re-execution of this check should always be possible
-    // by means of doing a cargo clean ...
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-env-changed=DOCKER_HOST");
+    println!("cargo::rerun-if-env-changed=UP_MQTT5_REQUIRE_BROKER");
 }

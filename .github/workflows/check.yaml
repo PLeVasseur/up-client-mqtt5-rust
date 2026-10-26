@@ -177,6 +177,8 @@ jobs:
     outputs:
       test_results_url: ${{ steps.test_results.outputs.artifact-url }}
     runs-on: ubuntu-latest
+    env:
+      UP_MQTT5_REQUIRE_BROKER: "1"
     strategy:
       matrix:
         feature-flags: ["", "--no-default-features", "--all-features"]
@@ -188,6 +190,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Prepare Mosquitto image
+        run: docker pull eclipse-mosquitto:2.0
+      - name: Check broker build configuration
+        run: python3 tools/test_broker_detection.py
       - name: Run lib tests
         run: |
           mkdir -p ${GITHUB_WORKSPACE}/target

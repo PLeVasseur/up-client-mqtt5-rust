@@ -52,6 +52,13 @@ To run the tests from the repo root directory, run
 cargo test
 ```
 
+For broker acceptance, first prepare `eclipse-mosquitto:2.0` on the Docker daemon
+selected by `DOCKER_HOST`, then run `UP_MQTT5_REQUIRE_BROKER=1 cargo test --locked`.
+The build script checks the local image without fetching it. Missing prerequisites
+fail in this mode; all four authentication, authorization and reconnect cases must
+execute. The [transport contract guide](docs/transport-contract.md) describes the
+default optional detection and the payload/TTL mapping separately.
+
 ### Running the Examples
 
 The examples show how the transport can be used to publish uProtocol messages from one uEntity and consume these messages on another uEntity.
