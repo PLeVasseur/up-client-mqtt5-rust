@@ -4,11 +4,15 @@ This library provides a Rust based implementation of the [MQTT 5 uProtocol Trans
 
 ## Getting Started
 
+The [transport contract guide](docs/transport-contract.md) describes configuration,
+opaque payload identity and TTL carriage. Public documentation is enforced with
+`missing_docs = "deny"` and warning-denied Rustdoc/doctests.
+
 Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-up-rust = { version = "0.9" }
+up-rust = { version = "0.10" }
 up-transport-mqtt5 = { version = "0.4" }
 ```
 
@@ -19,7 +23,7 @@ Please refer to [the crate's Rust Docs](https://docs.rs/up-transport-mqtt5/) and
 ### Clone the Repository
 
 ```sh
-git clone --recurse-submodules git@github.com:eclipse-uprotocol/up-rust
+git clone --recurse-submodules git@github.com:eclipse-uprotocol/up-transport-mqtt5-rust
 ```
 
 The `--recurse-submodules` parameter is important to make sure that the git submodule referring to the uProtocol specification is being initialized in the workspace. The files contained in that submodule define uProtocol's behavior and are used to trace requirements to implementation and test as part of CI workflows.

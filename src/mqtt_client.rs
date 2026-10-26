@@ -231,42 +231,42 @@ impl TryFrom<&SslOptions> for paho_mqtt::SslOptions {
 fn ustatus_from_paho_error(paho_error: paho_mqtt::Error) -> UStatus {
     match paho_error {
         paho_mqtt::Error::Disconnected => {
-            UStatus::fail_with_code(UCode::UNAVAILABLE, "not connected to MQTT broker")
+            UStatus::fail_with_code(UCode::Unavailable, "not connected to MQTT broker")
         }
         paho_mqtt::Error::TcpTlsConnectFailure => {
-            UStatus::fail_with_code(UCode::UNAVAILABLE, "failed to connect to MQTT broker")
+            UStatus::fail_with_code(UCode::Unavailable, "failed to connect to MQTT broker")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadUserNameOrPassword, _) => {
-            UStatus::fail_with_code(UCode::UNAUTHENTICATED, "bad credentials")
+            UStatus::fail_with_code(UCode::Unauthenticated, "bad credentials")
         }
         // [impl->dsn~mqtt5-transport-authorization~1]
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::NotAuthorized, _) => {
-            UStatus::fail_with_code(UCode::PERMISSION_DENIED, "not authorized")
+            UStatus::fail_with_code(UCode::PermissionDenied, "not authorized")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerUnavailable, _) => {
-            UStatus::fail_with_code(UCode::UNAVAILABLE, "server not available")
+            UStatus::fail_with_code(UCode::Unavailable, "server not available")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerBusy, _) => {
-            UStatus::fail_with_code(UCode::UNAVAILABLE, "server busy")
+            UStatus::fail_with_code(UCode::Unavailable, "server busy")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadAuthenticationMethod, _) => {
-            UStatus::fail_with_code(UCode::UNAUTHENTICATED, "bad authentication method")
+            UStatus::fail_with_code(UCode::Unauthenticated, "bad authentication method")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MessageRateTooHigh, _) => {
-            UStatus::fail_with_code(UCode::RESOURCE_EXHAUSTED, "message rate to high")
+            UStatus::fail_with_code(UCode::ResourceExhausted, "message rate to high")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::QuotaExceeded, _) => {
-            UStatus::fail_with_code(UCode::RESOURCE_EXHAUSTED, "quota exceeded")
+            UStatus::fail_with_code(UCode::ResourceExhausted, "quota exceeded")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ConnectionRateExceeded, _) => {
-            UStatus::fail_with_code(UCode::RESOURCE_EXHAUSTED, "connection rate exceeded")
+            UStatus::fail_with_code(UCode::ResourceExhausted, "connection rate exceeded")
         }
         paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MaximumConnectTime, _) => {
-            UStatus::fail_with_code(UCode::RESOURCE_EXHAUSTED, "maximum connect time exceeded")
+            UStatus::fail_with_code(UCode::ResourceExhausted, "maximum connect time exceeded")
         }
         _ => {
             error!("paho error: {paho_error:?}");
-            UStatus::fail_with_code(UCode::INTERNAL, paho_error.to_string())
+            UStatus::fail_with_code(UCode::Internal, paho_error.to_string())
         }
     }
 }
@@ -405,7 +405,7 @@ impl PahoBasedMqttClientOperations {
             .create_client()
             .map_err(|e| {
                 UStatus::fail_with_code(
-                    UCode::INTERNAL,
+                    UCode::Internal,
                     format!("Failed to create MQTT client: {e:?}"),
                 )
             })
@@ -435,7 +435,7 @@ impl PahoBasedMqttClientOperations {
     ) -> Result<Receiver<Option<paho_mqtt::Message>>, UStatus> {
         self.inbound_messages.take().ok_or_else(|| {
             UStatus::fail_with_code(
-                UCode::FAILED_PRECONDITION,
+                UCode::FailedPrecondition,
                 "Inbound message stream has already been retrieved",
             )
         })
@@ -519,7 +519,7 @@ impl MqttClientOperations for PahoBasedMqttClientOperations {
             return Ok(());
         }
         let connect_options = paho_mqtt::ConnectOptions::try_from(&self.client_options).map_err(
-            |e: paho_mqtt::Error| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()),
+            |e: paho_mqtt::Error| UStatus::fail_with_code(UCode::InvalidArgument, e.to_string()),
         )?;
         self.inner_mqtt_client
             .connect(connect_options)
@@ -632,7 +632,7 @@ impl MqttClientOperations for PahoBasedMqttClientOperations {
     async fn publish(&self, mqtt_message: paho_mqtt::Message) -> Result<(), UStatus> {
         if !self.is_connected() {
             return Err(UStatus::fail_with_code(
-                UCode::UNAVAILABLE,
+                UCode::Unavailable,
                 "Client has not established connection with broker yet",
             ));
         }
@@ -646,7 +646,7 @@ impl MqttClientOperations for PahoBasedMqttClientOperations {
     async fn subscribe(&self, topic: &str, id: u16) -> Result<(), UStatus> {
         if !self.is_connected() {
             return Err(UStatus::fail_with_code(
-                UCode::UNAVAILABLE,
+                UCode::Unavailable,
                 "Client has not established connection with broker yet",
             ));
         }
@@ -654,7 +654,7 @@ impl MqttClientOperations for PahoBasedMqttClientOperations {
             trace!("Creating subscription [topic: {}, ID: {}]", topic, id);
             Some(Self::create_subscription_id_properties(id).map_err(|_e| {
                 UStatus::fail_with_code(
-                    UCode::INTERNAL,
+                    UCode::Internal,
                     "Failed to create MQTT5 SubscriptionIdentifier property",
                 )
             })?)
@@ -706,43 +706,43 @@ mod tests {
     }
 
     #[test_case::test_case(
-        paho_mqtt::Error::TcpTlsConnectFailure => UCode::UNAVAILABLE;
+        paho_mqtt::Error::TcpTlsConnectFailure => UCode::Unavailable;
         "connect failure")]
     #[test_case::test_case(
-        paho_mqtt::Error::Disconnected => UCode::UNAVAILABLE;
+        paho_mqtt::Error::Disconnected => UCode::Unavailable;
         "disconnected")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadUserNameOrPassword, Properties::new()) => UCode::UNAUTHENTICATED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadUserNameOrPassword, Properties::new()) => UCode::Unauthenticated;
         "bad username or password")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::NotAuthorized, Properties::new()) => UCode::PERMISSION_DENIED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::NotAuthorized, Properties::new()) => UCode::PermissionDenied;
         "not authorized")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerUnavailable, Properties::new()) => UCode::UNAVAILABLE;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerUnavailable, Properties::new()) => UCode::Unavailable;
         "server unavailable")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerBusy, Properties::new()) => UCode::UNAVAILABLE;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ServerBusy, Properties::new()) => UCode::Unavailable;
         "server busy")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadAuthenticationMethod, Properties::new()) => UCode::UNAUTHENTICATED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::BadAuthenticationMethod, Properties::new()) => UCode::Unauthenticated;
         "bad authentication method")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MessageRateTooHigh, Properties::new()) => UCode::RESOURCE_EXHAUSTED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MessageRateTooHigh, Properties::new()) => UCode::ResourceExhausted;
         "message rate too high")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::QuotaExceeded, Properties::new()) => UCode::RESOURCE_EXHAUSTED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::QuotaExceeded, Properties::new()) => UCode::ResourceExhausted;
         "quota exceeded")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ConnectionRateExceeded, Properties::new()) => UCode::RESOURCE_EXHAUSTED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::ConnectionRateExceeded, Properties::new()) => UCode::ResourceExhausted;
         "connection rate exceeded")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MaximumConnectTime, Properties::new()) => UCode::RESOURCE_EXHAUSTED;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::MaximumConnectTime, Properties::new()) => UCode::ResourceExhausted;
         "maximum connect time exceeded")]
     #[test_case::test_case(
-        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::PacketTooLarge, Properties::new()) => UCode::INTERNAL;
+        paho_mqtt::Error::ReasonCode(paho_mqtt::ReasonCode::PacketTooLarge, Properties::new()) => UCode::Internal;
         "packet too large")]
     // [utest->dsn~mapping-of-reason-codes~1]
     fn test_ustatus_from_paho_error(paho_error: paho_mqtt::Error) -> UCode {
-        ustatus_from_paho_error(paho_error).get_code()
+        ustatus_from_paho_error(paho_error).code()
     }
 }

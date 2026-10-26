@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+//! Register an MQTT-backed uProtocol listener and receive published messages.
 use std::{
     str::{self, FromStr},
     sync::Arc,
@@ -36,7 +37,7 @@ impl UListener for LoggingListener {
         // does ensure that this function returns quickly, allowing the incoming message
         // handler to proceed as soon as possible.
         tokio::spawn(async move {
-            let msg_payload = message.payload.unwrap();
+            let msg_payload = message.payload().unwrap();
             let msg_str: &str = str::from_utf8(&msg_payload).unwrap();
             info!("Received message: {msg_str}");
             // simulate some time consuming processing
@@ -63,7 +64,7 @@ async fn main() -> Result<(), UStatus> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let command = Command::parse();
-    let authority = command.topic_filter.authority_name.clone();
+    let authority = command.topic_filter.authority_name().to_string();
     let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
     (|| {

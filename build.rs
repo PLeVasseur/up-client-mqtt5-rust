@@ -10,8 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
+//! Detect Docker-backed broker availability for the transport's integration tests.
 use testcontainers::{runners::SyncRunner, GenericImage};
 
+/// Enables the integration-test configuration when the Mosquitto image can be pulled.
 pub fn main() {
     // Try to pull the Mosquitto MQTT broker container image which will be needed to
     // run integration tests.

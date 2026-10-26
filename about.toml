@@ -9,6 +9,7 @@ accepted = [
     "EPL-2.0",
     "ISC",
     "MIT",
+    "MIT-0", # borrow-or-share, used by the SDK's fluent-uri parser
     # Unicode-3.0 is not (yet) on the Eclipse Foundation's list of approved licenses
     # however, all of its predecessors are, thus we assume that 3.0 is also ok to use
     "Unicode-3.0",
