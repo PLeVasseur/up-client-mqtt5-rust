@@ -236,14 +236,12 @@ impl MessageMapper for DefaultMessageMapper {
                 })?;
             // Brokers decrement the seconds property. Preserve the original
             // lifetime independently, including whole-second TTLs.
-            if ttl % 1000 != 0 {
-                add_user_property(
-                    &mut properties,
-                    KEY_TTL,
-                    &ttl.to_string(),
-                    "Failed to add TTL to MQTT User Properties",
-                )?;
-            }
+            add_user_property(
+                &mut properties,
+                KEY_TTL,
+                &ttl.to_string(),
+                "Failed to add TTL to MQTT User Properties",
+            )?;
         }
 
         add_user_property(
@@ -828,6 +826,61 @@ mod tests {
             remapped.get_string(paho_mqtt::PropertyCode::ContentType),
             Some(encoding.id().to_string())
         );
+    }
+
+    #[test_case(None, None, None; "no expiry")]
+    #[test_case(Some(0), None, None; "explicit zero omits both properties")]
+    #[test_case(Some(1), Some(1), Some("1"); "one millisecond rounds up")]
+    #[test_case(Some(1000), Some(1), Some("1000"); "whole second retains original")]
+    #[test_case(Some(1001), Some(2), Some("1001"); "fractional second retains original")]
+    #[test_case(Some(u32::MAX), Some(4_294_968), Some("4294967295"); "maximum TTL stays exact")]
+    fn outgoing_ttl_properties_preserve_original_lifetime(
+        ttl: Option<u32>,
+        seconds: Option<u32>,
+        exact: Option<&str>,
+    ) {
+        let mut builder = UMessageBuilder::publish(UUri::from_str(EVENT_SOURCE).unwrap());
+        if let Some(ttl) = ttl {
+            builder.with_ttl(ttl);
+        }
+        let message = builder.build().unwrap();
+        let properties = DefaultMessageMapper
+            .create_mqtt_properties_from_uattributes(message.attributes())
+            .unwrap();
+        assert_eq!(
+            properties
+                .get(paho_mqtt::PropertyCode::MessageExpiryInterval)
+                .and_then(|p| p.get_u32()),
+            seconds
+        );
+        assert_eq!(properties.find_user_property(KEY_TTL).as_deref(), exact);
+    }
+
+    #[test_case(30_000; "whole second original TTL")]
+    #[test_case(30_001; "fractional second original TTL")]
+    fn broker_decrement_does_not_age_original_ttl_twice(ttl: u32) {
+        let (msb, lsb) = UUID::build().as_u64_pair();
+        let id = UUID::from_u64_pair(msb - (16_000 << 16), lsb).unwrap();
+        let message = UMessageBuilder::publish(UUri::from_str(EVENT_SOURCE).unwrap())
+            .with_message_id(id.clone())
+            .with_ttl(ttl)
+            .build()
+            .unwrap();
+        let outgoing = DefaultMessageMapper
+            .create_mqtt_properties_from_uattributes(message.attributes())
+            .unwrap();
+        let original = outgoing
+            .find_user_property(KEY_TTL)
+            .expect("sender retains original TTL");
+        let mut delivered = minimal_publish_properties(&id);
+        delivered
+            .push_u32(paho_mqtt::PropertyCode::MessageExpiryInterval, 15)
+            .unwrap();
+        add_user_property(&mut delivered, KEY_TTL, &original, "original TTL").unwrap();
+        let attributes = DefaultMessageMapper
+            .create_uattributes_from_mqtt_properties(&delivered)
+            .unwrap();
+        assert_eq!(attributes.ttl(), Some(ttl));
     }
 
     #[test_case(None; "legacy zero expiry")]
