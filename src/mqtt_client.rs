@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use backon::Retryable;
 #[cfg(feature = "cli")]
 use clap::Args;
+use futures::FutureExt;
 use tracing::{debug, error, trace};
 use up_rust::{UCode, UStatus};
 
@@ -328,6 +329,26 @@ pub(crate) trait MqttClientOperations: Sync + Send {
     /// # Arguments
     /// * `topic` - Topic to unsubscribe from.
     async fn unsubscribe(&self, topic: &str) -> Result<(), UStatus>;
+
+    /// Unsubscribes from a topic without waiting for the broker's response.
+    ///
+    /// This withdraws a subscription whose SUBSCRIBE request is no longer being awaited,
+    /// e.g. because the registration of a listener has been cancelled. The broker may still
+    /// establish such a subscription after the future awaiting the request has been dropped.
+    ///
+    /// Implementations need to hand the UNSUBSCRIBE request to the broker connection before
+    /// returning, so that the broker processes it after any request that has been handed over
+    /// before and before any request that is handed over afterwards. The outcome is not
+    /// reported, unsubscribing from a topic that has no subscription has no effect.
+    ///
+    /// The default implementation polls the future returned by [`Self::unsubscribe`] once
+    /// and then drops it.
+    ///
+    /// # Arguments
+    /// * `topic` - Topic to unsubscribe from.
+    fn abandon_subscription(&self, topic: &str) {
+        let _ = self.unsubscribe(topic).now_or_never();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -677,6 +698,12 @@ impl MqttClientOperations for PahoBasedMqttClientOperations {
             .await
             .map_err(ustatus_from_paho_error)
             .map(|_| ())
+    }
+
+    fn abandon_subscription(&self, topic: &str) {
+        // The Paho client queues the request for the broker connection right away and
+        // completes it independently of the returned token, which is not awaited.
+        let _token = self.inner_mqtt_client.unsubscribe(topic);
     }
 }
 

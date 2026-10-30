@@ -55,7 +55,10 @@ use listener_registry::{RegisteredListeners, SubscriptionIdentifier};
 use mqtt_client::MqttClientOperations;
 pub use mqtt_client::{MqttClientOptions, SslOptions};
 use paho_mqtt::{self as mqtt, Message, QOS_1};
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{RwLock, RwLockWriteGuard},
+    task::JoinHandle,
+};
 use tracing::{debug, trace};
 #[allow(unused_imports)]
 use up_rust::UTransport;
@@ -320,6 +323,54 @@ fn determine_listeners(
     }
 }
 
+/// Removes a newly registered topic filter again, unless the broker has responded to the
+/// SUBSCRIBE request for it.
+///
+/// A registration future can be dropped while it waits for the broker's response. At that
+/// point, the registry already contains the topic filter, its listener and the subscription
+/// identifier, and the MQTT client has handed the SUBSCRIBE request to the broker connection.
+/// The request completes independently of the dropped future, i.e. the broker may still
+/// establish the subscription. Dropping the guard before [`Self::complete`] has been invoked
+/// therefore removes the topic filter from the registry and withdraws the subscription from
+/// the broker. Both happen while the guard still holds the registry's write lock, so that the
+/// broker processes the withdrawal before any SUBSCRIBE request of a subsequent registration.
+struct PendingSubscription<'a> {
+    registered_listeners: RwLockWriteGuard<'a, RegisteredListeners>,
+    mqtt_client: &'a dyn MqttClientOperations,
+    topic_filter: &'a str,
+    subscription_id: SubscriptionIdentifier,
+    awaiting_response: bool,
+}
+
+impl PendingSubscription<'_> {
+    /// Completes the registration with the broker's response to the SUBSCRIBE request.
+    ///
+    /// Removes the topic filter from the registry again, if the request has failed.
+    fn complete(mut self, subscribe_result: Result<(), UStatus>) -> Result<(), UStatus> {
+        self.awaiting_response = false;
+        if subscribe_result.is_err() {
+            // add subscription id back to free subscription ids
+            self.registered_listeners
+                .release_subscription_id(self.subscription_id, self.topic_filter);
+        }
+        subscribe_result
+    }
+}
+
+impl Drop for PendingSubscription<'_> {
+    fn drop(&mut self) {
+        if self.awaiting_response {
+            debug!(
+                "Listener registration has been cancelled before subscription has been acknowledged [topic filter: {}, id: {}]",
+                self.topic_filter, self.subscription_id
+            );
+            self.registered_listeners
+                .release_subscription_id(self.subscription_id, self.topic_filter);
+            self.mqtt_client.abandon_subscription(self.topic_filter);
+        }
+    }
+}
+
 fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatus> {
     let authority_name = authority.into();
     // use validation logic of UUri for authority name validation
@@ -369,6 +420,16 @@ fn verify_authority_name<S: Into<String>>(authority: S) -> Result<String, UStatu
 ///
 /// The transport can be configured with the maximum number of filter patterns that listeners can
 /// be registered for by means of the [Mqtt5TransportOptions] struct that is being passed into [Self::new].
+/// Registering a listener again for the same filter criteria succeeds without any further effect,
+/// even if the maximum number of listeners for the filter pattern has been reached.
+///
+/// ### Cancelling a listener registration
+///
+/// If the future returned by [up_rust::UTransport::register_listener] is dropped while the transport
+/// is waiting for the MQTT broker to acknowledge the subscription for a new filter pattern, the
+/// registration has no effect: the transport removes the filter pattern and the listener again and
+/// withdraws the subscription from the broker, in case the broker still establishes it. Such a
+/// registration can therefore be retried like a failed one.
 ///
 /// ### Authentication & Authorization
 ///
@@ -587,6 +648,11 @@ impl Mqtt5Transport {
 
     /// Adds a listener for an MQTT topic filter.
     ///
+    /// Subscribes to the topic filter with the MQTT broker, if the listener is the first one
+    /// for the topic filter. If the returned future is dropped before the broker has responded
+    /// to the SUBSCRIBE request, the registration has no effect: the topic filter and listener
+    /// are removed again and the subscription is withdrawn from the broker.
+    ///
     /// # Arguments
     /// * `topic_filter` - The topic filter to add the listener for.
     /// * `listener` - The callback to invoke for each incoming message that matches the filter.
@@ -600,15 +666,20 @@ impl Mqtt5Transport {
         if let Some(subscription_id) =
             registered_listeners_write.add_listener(topic_filter, listener)?
         {
+            let pending_subscription = PendingSubscription {
+                registered_listeners: registered_listeners_write,
+                mqtt_client: self.mqtt_client.as_ref(),
+                topic_filter,
+                subscription_id,
+                awaiting_response: true,
+            };
             // Subscribe to topic.
-            if let Err(sub_err) = self
+            let subscribe_result = self
                 .mqtt_client
                 .subscribe(topic_filter, subscription_id)
-                .await
-            {
+                .await;
+            if let Err(sub_err) = pending_subscription.complete(subscribe_result) {
                 debug!("Failed to create new subscription for listener");
-                // If subscribe fails, add subscription id back to free subscription ids.
-                registered_listeners_write.release_subscription_id(subscription_id, topic_filter);
                 return Err(sub_err);
             }
             debug!(
@@ -668,9 +739,14 @@ impl Mqtt5Transport {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, str::FromStr};
+    use std::{
+        collections::{HashMap, VecDeque},
+        str::FromStr,
+    };
 
+    use listener_registry::{ListenerRegistry, SubscribedTopicProvider};
     use mqtt_client::MockMqttClientOperations;
+    use tokio::sync::oneshot;
     use up_rust::{MockUListener, PayloadEncoding, UMessageBuilder, UTransport, UUID};
 
     use test_case::test_case;
@@ -1088,5 +1164,330 @@ mod tests {
         // If the test completes without panic, it means:
         // 1. The validator was called exactly once
         // 2. The listener registry methods were never called (message was discarded)
+    }
+
+    /// A request that a [`ControlledMqttClient`] has handed to the broker connection.
+    #[derive(Clone, Debug, PartialEq)]
+    enum BrokerRequest {
+        Subscribe { topic_filter: String, id: u16 },
+        Unsubscribe { topic_filter: String },
+    }
+
+    #[derive(Default)]
+    struct ControlledBroker {
+        // the requests in the order in which they have been handed to the broker connection,
+        // along with the broker's response (None while a SUBSCRIBE request is pending)
+        requests: Vec<(BrokerRequest, Option<Result<(), UStatus>>)>,
+        // the responses to upcoming SUBSCRIBE requests, None leaves a request pending
+        subscribe_responses: VecDeque<Option<Result<(), UStatus>>>,
+        // the channels for passing responses to the futures awaiting pending SUBSCRIBE requests
+        pending_subacks: HashMap<usize, oneshot::Sender<Result<(), UStatus>>>,
+    }
+
+    /// An MQTT client that hands a SUBSCRIBE request to the broker connection when the
+    /// subscribe future is polled for the first time, like the Paho based client does.
+    ///
+    /// The broker processes all requests in order. Its response to a request takes effect
+    /// regardless of whether the future that has issued the request is still being polled.
+    #[derive(Default)]
+    struct ControlledMqttClient {
+        broker: std::sync::Mutex<ControlledBroker>,
+    }
+
+    impl ControlledMqttClient {
+        fn with_subscribe_responses(
+            responses: impl IntoIterator<Item = Option<Result<(), UStatus>>>,
+        ) -> Self {
+            let client = Self::default();
+            client
+                .broker
+                .lock()
+                .unwrap()
+                .subscribe_responses
+                .extend(responses);
+            client
+        }
+
+        fn requests(&self) -> Vec<BrokerRequest> {
+            self.broker
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .map(|(request, _response)| request.clone())
+                .collect()
+        }
+
+        /// Lets the broker respond to a pending SUBSCRIBE request.
+        fn respond_to_subscribe(&self, request_index: usize, response: Result<(), UStatus>) {
+            let mut broker_guard = self.broker.lock().unwrap();
+            let broker = &mut *broker_guard;
+            let (request, pending_response) = &mut broker.requests[request_index];
+            assert!(
+                matches!(request, BrokerRequest::Subscribe { .. }) && pending_response.is_none(),
+                "request {request_index} is not a pending SUBSCRIBE request"
+            );
+            *pending_response = Some(response.clone());
+            if let Some(suback) = broker.pending_subacks.remove(&request_index) {
+                // the future that has issued the request may have been dropped already
+                let _ = suback.send(response);
+            }
+        }
+
+        /// Determines the topic filters (and subscription IDs) that the broker has subscriptions
+        /// for, after having processed the requests that it has responded to.
+        fn subscriptions(&self) -> HashMap<String, u16> {
+            let mut subscriptions = HashMap::new();
+            for (request, response) in &self.broker.lock().unwrap().requests {
+                match (request, response) {
+                    (BrokerRequest::Subscribe { topic_filter, id }, Some(Ok(()))) => {
+                        subscriptions.insert(topic_filter.clone(), *id);
+                    }
+                    (BrokerRequest::Unsubscribe { topic_filter }, _) => {
+                        subscriptions.remove(topic_filter);
+                    }
+                    _ => {}
+                }
+            }
+            subscriptions
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MqttClientOperations for ControlledMqttClient {
+        async fn connect(&self) -> Result<(), UStatus> {
+            Ok(())
+        }
+
+        async fn reconnect(&self) {}
+
+        fn disconnect(&self) {}
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn publish(&self, _mqtt_message: paho_mqtt::Message) -> Result<(), UStatus> {
+            Ok(())
+        }
+
+        async fn subscribe(&self, topic: &str, id: u16) -> Result<(), UStatus> {
+            let suback = {
+                let mut broker = self.broker.lock().unwrap();
+                let response = broker
+                    .subscribe_responses
+                    .pop_front()
+                    .unwrap_or(Some(Ok(())));
+                let request = BrokerRequest::Subscribe {
+                    topic_filter: topic.to_string(),
+                    id,
+                };
+                broker.requests.push((request, response.clone()));
+                if let Some(response) = response {
+                    return response;
+                }
+                let (suback_sender, suback) = oneshot::channel();
+                let request_index = broker.requests.len() - 1;
+                broker.pending_subacks.insert(request_index, suback_sender);
+                suback
+            };
+            suback
+                .await
+                .expect("broker has not responded to SUBSCRIBE request")
+        }
+
+        async fn unsubscribe(&self, topic: &str) -> Result<(), UStatus> {
+            let request = BrokerRequest::Unsubscribe {
+                topic_filter: topic.to_string(),
+            };
+            self.broker
+                .lock()
+                .unwrap()
+                .requests
+                .push((request, Some(Ok(()))));
+            Ok(())
+        }
+    }
+
+    fn create_transport(
+        mqtt_client: Arc<dyn MqttClientOperations>,
+        registered_listeners: RegisteredListeners,
+    ) -> Mqtt5Transport {
+        Mqtt5Transport {
+            mqtt_client,
+            registered_listeners: Arc::new(RwLock::new(registered_listeners)),
+            message_mapper: Arc::new(mapping::DefaultMessageMapper),
+            authority_name: "vin.vehicles".to_string(),
+            mode: TransportMode::InVehicle,
+            message_callback_handle: None,
+        }
+    }
+
+    /// Maps the topic filters that listeners are registered for to their subscription IDs.
+    async fn registered_topic_filters(transport: &Mqtt5Transport) -> HashMap<String, u16> {
+        transport
+            .registered_listeners
+            .read()
+            .await
+            .get_subscribed_topics()
+            .into_iter()
+            .map(|(subscription_id, topic_filter)| (topic_filter, subscription_id))
+            .collect()
+    }
+
+    const CANCELLED_SOURCE_FILTER: &str = "//vin.vehicles/A8000/2/8A50";
+    const CANCELLED_TOPIC_FILTER: &str = "vin.vehicles/8000/A/2/8A50";
+
+    /// Starts registering a listener for [`CANCELLED_SOURCE_FILTER`] and drops the registration
+    /// while it is waiting for the broker to respond to the SUBSCRIBE request for the new filter.
+    async fn cancel_registration_awaiting_subscribe(
+        transport: &Mqtt5Transport,
+        mqtt_client: &ControlledMqttClient,
+        listener: Arc<dyn up_rust::UListener>,
+    ) {
+        let source_filter = UUri::from_str(CANCELLED_SOURCE_FILTER).expect("invalid source filter");
+        let mut registration = transport.register_listener(&source_filter, None, listener);
+        assert!(futures::poll!(registration.as_mut()).is_pending());
+        assert_eq!(
+            mqtt_client.requests(),
+            vec![BrokerRequest::Subscribe {
+                topic_filter: CANCELLED_TOPIC_FILTER.to_string(),
+                id: 1
+            }],
+            "registration should be waiting for the broker to respond to SUBSCRIBE request"
+        );
+        // the caller gives up on the registration, e.g. because of a timeout
+        drop(registration);
+    }
+
+    #[test_case(Err(UCode::PermissionDenied); "if SUBSCRIBE request fails late")]
+    #[test_case(Ok(()); "if SUBSCRIBE request succeeds late")]
+    #[tokio::test]
+    async fn test_cancelled_register_listener_leaves_no_registration_behind(
+        late_response: Result<(), UCode>,
+    ) {
+        let late_response =
+            late_response.map_err(|code| UStatus::fail_with_code(code, "SUBSCRIBE failed"));
+        let listener = Arc::new(MockUListener::new());
+        // the broker does not respond to the first SUBSCRIBE request right away
+        let mqtt_client = Arc::new(ControlledMqttClient::with_subscribe_responses([None]));
+        // support a single topic filter only, so that a retained subscription ID exhausts the registry
+        let transport = create_transport(mqtt_client.clone(), RegisteredListeners::new(1, 5));
+
+        cancel_registration_awaiting_subscribe(&transport, &mqtt_client, listener.clone()).await;
+
+        {
+            let registry = transport.registered_listeners.read().await;
+            assert!(
+                registry.get_subscribed_topics().is_empty(),
+                "cancelled registration has retained topic filter and subscription ID: {:?}",
+                registry.get_subscribed_topics()
+            );
+            assert!(
+                registry
+                    .determine_listeners_for_topic(CANCELLED_TOPIC_FILTER)
+                    .is_empty(),
+                "cancelled registration has retained listener"
+            );
+        }
+
+        // the SUBSCRIBE request completes independently of the dropped registration
+        mqtt_client.respond_to_subscribe(0, late_response);
+        assert!(
+            mqtt_client.subscriptions().is_empty(),
+            "broker has retained subscription of cancelled registration [requests: {:?}]",
+            mqtt_client.requests()
+        );
+
+        // the subscription ID of the cancelled registration can be used for another topic filter
+        let other_source_filter =
+            UUri::from_str("//vin.vehicles/B8000/3/8A50").expect("invalid source filter");
+        let other_registration = transport
+            .register_listener(&other_source_filter, None, listener.clone())
+            .await;
+        assert!(
+            other_registration.is_ok(),
+            "failed to register listener for other topic filter: {other_registration:?}"
+        );
+        assert_eq!(
+            mqtt_client.subscriptions(),
+            registered_topic_filters(&transport).await,
+            "broker subscriptions do not match registered topic filters [requests: {:?}]",
+            mqtt_client.requests()
+        );
+    }
+
+    #[test_case(Err(UCode::PermissionDenied), true; "if SUBSCRIBE request fails before retry")]
+    #[test_case(Ok(()), true; "if SUBSCRIBE request succeeds before retry")]
+    #[test_case(Err(UCode::PermissionDenied), false; "if SUBSCRIBE request fails after retry")]
+    #[test_case(Ok(()), false; "if SUBSCRIBE request succeeds after retry")]
+    #[tokio::test]
+    // [utest->dsn~utransport-registerlistener-start-invoking-listeners~1]
+    async fn test_register_listener_retry_after_cancellation_subscribes_again(
+        late_response: Result<(), UCode>,
+        respond_before_retry: bool,
+    ) {
+        let late_response =
+            late_response.map_err(|code| UStatus::fail_with_code(code, "SUBSCRIBE failed"));
+        let listener = Arc::new(MockUListener::new());
+        // the broker does not respond to the first SUBSCRIBE request right away
+        // but succeeds all subsequent requests immediately
+        let mqtt_client = Arc::new(ControlledMqttClient::with_subscribe_responses([None]));
+        // support a single topic filter only, so that a leaked subscription ID exhausts the registry
+        let transport = create_transport(mqtt_client.clone(), RegisteredListeners::new(1, 5));
+
+        cancel_registration_awaiting_subscribe(&transport, &mqtt_client, listener.clone()).await;
+
+        if respond_before_retry {
+            mqtt_client.respond_to_subscribe(0, late_response.clone());
+        }
+        let source_filter = UUri::from_str(CANCELLED_SOURCE_FILTER).expect("invalid source filter");
+        let retry_result = transport
+            .register_listener(&source_filter, None, listener.clone())
+            .await;
+        let broker_subscriptions_on_success = mqtt_client.subscriptions();
+        let requests_on_success = mqtt_client.requests();
+        if !respond_before_retry {
+            mqtt_client.respond_to_subscribe(0, late_response);
+        }
+
+        assert!(retry_result.is_ok(), "retry has failed: {retry_result:?}");
+        let registered_topic_filters = registered_topic_filters(&transport).await;
+        let subscription_id = *registered_topic_filters
+            .get(CANCELLED_TOPIC_FILTER)
+            .expect("no subscription ID for topic filter");
+        assert_eq!(
+            broker_subscriptions_on_success.get(CANCELLED_TOPIC_FILTER),
+            Some(&subscription_id),
+            "registration has succeeded without a broker subscription for the topic filter [requests: {requests_on_success:?}]"
+        );
+        assert!(
+            requests_on_success[1..].contains(&BrokerRequest::Subscribe {
+                topic_filter: CANCELLED_TOPIC_FILTER.to_string(),
+                id: subscription_id
+            }),
+            "retry has not subscribed to the topic filter [requests: {requests_on_success:?}]"
+        );
+        // exactly one logical listener and subscription ID
+        assert_eq!(registered_topic_filters.len(), 1);
+        {
+            let registry = transport.registered_listeners.read().await;
+            let expected_listeners = HashSet::from([ComparableListener::new(listener.clone())]);
+            assert_eq!(
+                registry.determine_listeners_for_topic(CANCELLED_TOPIC_FILTER),
+                expected_listeners
+            );
+            assert_eq!(
+                registry.determine_listeners_for_subscription_id(subscription_id),
+                Some(expected_listeners)
+            );
+        }
+        // once the broker has responded to all requests, its subscriptions match the registry
+        assert_eq!(
+            mqtt_client.subscriptions(),
+            registered_topic_filters,
+            "broker subscriptions do not match registered topic filters [requests: {:?}]",
+            mqtt_client.requests()
+        );
     }
 }

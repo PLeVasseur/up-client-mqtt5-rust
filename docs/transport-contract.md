@@ -39,3 +39,15 @@ the broker-expiry rules remain separate from this reconstruction policy.
 The SDK dependency explicitly enables `up-core-api` for the protobuf-backed
 message/attribute conversions used by MQTT. Opaque carriage itself does not require
 the SDK's selected-wire adapter or native agreement features.
+
+## Listener registration
+
+Registering the same listener for the same filter again has the effect of a single
+registration: it succeeds without further changes, also when the filter's listener
+limit has been reached, while a distinct listener then fails with `RESOURCE_EXHAUSTED`.
+Registering the first listener for a filter makes the transport subscribe to the filter
+with the broker. If the registration future is dropped before the broker has responded,
+the registration has no effect: the filter, listener and subscription identifier are
+removed again, and the transport withdraws the subscription, which the broker may still
+establish, before any later registration subscribes. A cancelled registration can be
+retried like a failed one.

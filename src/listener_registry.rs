@@ -94,8 +94,9 @@ impl RegisteredListeners {
     /// Also removes all listeners registered for the given topic filter as well as
     /// the mapping of the subscription identifier to the topic filter.
     ///
-    /// This function should be invoked after a failed attempt to subscribe to the
-    /// topic filter with the subscription identifier.
+    /// This function should be invoked after an attempt to subscribe to the topic filter
+    /// with the subscription identifier has failed or has been abandoned before the broker
+    /// has responded.
     ///
     /// # Arguments
     /// * `id` - The subscription ID to release.
@@ -116,20 +117,25 @@ impl RegisteredListeners {
     /// the listener has been registered for and which matches the topic that the message
     /// has been published to.
     ///
+    /// Adding a listener that is already registered for the topic filter has no effect,
+    /// regardless of how many listeners are registered for the topic filter.
+    ///
     /// # Returns
     ///
     /// A newly assigned subscription identifier to be used for subscribing to the topic
-    /// filter with the MQTT broker, or `None` if the listener has been added to an existing
-    /// subscription for the topic filter.
+    /// filter with the MQTT broker, or `None` if the listener has been added to (or already
+    /// is part of) an existing subscription for the topic filter.
     ///
     /// Note that the [Self::release_subscription_id] function must be invoked, if subscribing
-    /// to the topic filter with the MQTT broker fails. Otherwise, the pool of available
-    /// subscription IDs might exhaust early.
+    /// to the topic filter with the MQTT broker fails or is abandoned before the broker has
+    /// responded. Otherwise, the topic filter remains registered without a subscription and
+    /// the pool of available subscription IDs might exhaust early.
     ///
     /// # Errors
     ///
-    /// Returns an error with `UCode::ResourceExhausted` if the maximum number of topic filters
-    /// or the maximum number of listeners per topic filter has already been reached.
+    /// Returns an error with `UCode::ResourceExhausted` if the listener is not registered for
+    /// the topic filter yet and the maximum number of topic filters or the maximum number of
+    /// listeners per topic filter has already been reached.
     pub(crate) fn add_listener(
         &mut self,
         topic_filter: &str,
@@ -144,6 +150,15 @@ impl RegisteredListeners {
         if let Some((subscription_id, listeners)) =
             self.subscriptions_by_topic_filter.get_mut(topic_filter)
         {
+            // an already registered listener does not count against the limit again
+            if listeners.contains(&comp_listener) {
+                debug!(
+                    "Listener has already been registered [topic filter: {}]",
+                    topic_filter
+                );
+                return Ok(None);
+            }
+
             // [impl->dsn~utransport-registerlistener-error-resource-exhausted~1]
             if listeners.len() >= self.max_listeners_per_subscription {
                 return Err(UStatus::fail_with_code(
@@ -439,6 +454,51 @@ mod tests {
                 .add_listener(topic_filter_2, listener_2.clone())
                 .is_err_and(|err| err.code() == UCode::ResourceExhausted),
             "It should not have been possible to register a listener for another topic filter"
+        );
+    }
+
+    #[test_case::test_case(1; "for a capacity of one listener per topic filter")]
+    #[test_case::test_case(3; "for a capacity of three listeners per topic filter")]
+    // [utest->dsn~utransport-registerlistener-idempotent~1]
+    fn test_add_listener_is_idempotent_at_listener_capacity(max_listeners_per_filter: u16) {
+        let topic_filter = "+/local_authority";
+        let topic = "remote_authority/local_authority";
+        let listener = Arc::new(MockUListener::new());
+        let mut registered_listeners = RegisteredListeners::new(1, max_listeners_per_filter);
+
+        let subscription_id = registered_listeners
+            .add_listener(topic_filter, listener.clone())
+            .expect("Failed to register listener")
+            .expect("Did not create new subscription ID");
+        // use up the remaining capacity of the topic filter with other listeners
+        for _ in 1..max_listeners_per_filter {
+            assert!(registered_listeners
+                .add_listener(topic_filter, Arc::new(MockUListener::new()))
+                .expect("Failed to register other listener")
+                .is_none());
+        }
+
+        // registering the same listener again has the same effect as a single registration,
+        // also if the maximum number of listeners for the topic filter has been reached
+        let result = registered_listeners.add_listener(topic_filter, listener.clone());
+        assert!(
+            matches!(result, Ok(None)),
+            "registering an already registered listener at capacity should succeed without a new subscription ID: {result:?}"
+        );
+        let listeners = registered_listeners.determine_listeners_for_topic(topic);
+        assert_eq!(listeners.len(), usize::from(max_listeners_per_filter));
+        assert!(listeners.contains(&ComparableListener::new(listener.clone())));
+        assert_eq!(
+            registered_listeners.get_subscribed_topics(),
+            HashMap::from([(subscription_id, topic_filter.to_string())])
+        );
+
+        // [utest->dsn~utransport-registerlistener-error-resource-exhausted~1]
+        assert!(
+            registered_listeners
+                .add_listener(topic_filter, Arc::new(MockUListener::new()))
+                .is_err_and(|err| err.code() == UCode::ResourceExhausted),
+            "It should not have been possible to register another distinct listener at capacity"
         );
     }
 
