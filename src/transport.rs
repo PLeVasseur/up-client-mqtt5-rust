@@ -154,7 +154,7 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Publish,
-            "//vin.vehicles/A8000/2/8A50",
+            "//vin.vehicles/8000/A/2/8A50",
             None,
             "payload",
         ),
@@ -166,7 +166,7 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Publish,
-            "//vin.vehicles/A8000/2/8A50",
+            "//vin.vehicles/8000/A/2/8A50",
             None,
             "payload",
         ),
@@ -179,7 +179,7 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Publish,
-            "//vin.vehicles/A8000/2/8A50",
+            "//vin.vehicles/8000/A/2/8A50",
             None,
             "payload",
         ),
@@ -191,8 +191,8 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Notification,
-            "/A8000/2/8A50",
-            Some("//vin.vehicles/B8000/3/0"),
+            "/8000/A/2/8A50",
+            Some("//vin.vehicles/8000/B/3/0"),
             "payload",
         ),
         "vin.vehicles/8000/A/2/8A50/vin.vehicles/8000/B/3/0",
@@ -203,8 +203,8 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Request,
-            "//vin.vehicles/A8000/2/0",
-            Some("//vin.vehicles/B8000/3/10AB"),
+            "//vin.vehicles/8000/A/2/0",
+            Some("//vin.vehicles/8000/B/3/10AB"),
             "payload",
         ),
         "vin.vehicles/8000/A/2/0/vin.vehicles/8000/B/3/10AB",
@@ -215,8 +215,8 @@ mod tests {
     #[test_case(
         create_test_message(
             UMessageType::Response,
-            "//vin.vehicles/B8000/3/10AB",
-            Some("//vin.vehicles/A8000/2/0"),
+            "//vin.vehicles/8000/B/3/10AB",
+            Some("//vin.vehicles/8000/A/2/0"),
             "payload",
         ),
         "vin.vehicles/8000/B/3/10AB/vin.vehicles/8000/A/2/0",
@@ -288,7 +288,7 @@ mod tests {
 
     // [utest->dsn~utransport-registerlistener-error-unimplemented~1]
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
+        "//vin.vehicles/8000/A/2/8A50",
         None,
         "vin.vehicles/8000/A/2/8A50".to_string(),
         None,
@@ -296,7 +296,7 @@ mod tests {
         "succeeds for source filter"
     )]
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
+        "//vin.vehicles/8000/A/2/8A50",
         None,
         "vin.vehicles/8000/A/2/8A50".to_string(),
         Some(UCode::Unavailable),
@@ -304,8 +304,8 @@ mod tests {
         "fails if not connected to broker"
     )]
     #[test_case(
-        "//vin.vehicles/FFFF8000/2/8A50",
-        Some("//vin.vehicles/B8000/3/0"),
+        "//vin.vehicles/8000/FFFF/2/8A50",
+        Some("//vin.vehicles/8000/B/3/0"),
         "vin.vehicles/8000/+/2/8A50/vin.vehicles/8000/B/3/0".to_string(),
         None,
         None;
@@ -368,28 +368,28 @@ mod tests {
     }
 
     #[test_case(
-        "//vin.vehicles/FFFF8000/2/0",
+        "//vin.vehicles/8000/FFFF/2/0",
         None;
         "for empty sink filter with source resource ID 0"
     )]
     #[test_case(
-        "//vin.vehicles/FFFFFFFF/2/7FFF",
+        "//vin.vehicles/FFFF/FFFF/2/7FFF",
         None;
         "for empty sink filter with RPC method source resource ID"
     )]
     #[test_case(
-        "//vin.vehicles/FFFFA000/2/0",
-        Some("//vin.vehicles/FFFFFFFF/3/0");
+        "//vin.vehicles/A000/FFFF/2/0",
+        Some("//vin.vehicles/FFFF/FFFF/3/0");
         "for source and sink filter having resource ID 0"
     )]
     #[test_case(
-        "//vin.vehicles/A000/2/5555",
-        Some("//vin.vehicles/B8000/3/1A00");
+        "//vin.vehicles/A000/1/2/5555",
+        Some("//vin.vehicles/8000/B/3/1A00");
         "for RPC sink and source having RPC method resource ID"
     )]
     #[test_case(
-        "//vin.vehicles/FFFFFFFF/2/B100",
-        Some("//vin.vehicles/B8000/3/1A00");
+        "//vin.vehicles/FFFF/FFFF/2/B100",
+        Some("//vin.vehicles/8000/B/3/1A00");
         "for RPC sink and source having event resource ID"
     )]
     #[tokio::test]
@@ -436,22 +436,22 @@ mod tests {
 
     // [utest->dsn~utransport-unregisterlistener-error-unimplemented~1]
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
+        "//vin.vehicles/8000/A/2/8A50",
         None,
         "vin.vehicles/8000/A/2/8A50".to_string(),
         None;
         "succeeds for source filter"
     )]
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
+        "//vin.vehicles/8000/A/2/8A50",
         None,
         "vin.vehicles/8000/A/2/8A50".to_string(),
         Some(UCode::Unavailable);
         "fails if not connected to broker"
     )]
     #[test_case(
-        "//vin.vehicles/FFFF8000/2/8A50",
-        Some("//vin.vehicles/B8000/3/0"),
+        "//vin.vehicles/8000/FFFF/2/8A50",
+        Some("//vin.vehicles/8000/B/3/0"),
         "vin.vehicles/8000/+/2/8A50/vin.vehicles/8000/B/3/0".to_string(),
         None;
         "succeeds for source and sink filter"
@@ -541,7 +541,7 @@ mod tests {
         // [utest->dsn~utransport-receive-error-unimplemented~1]
         assert!(client
             .receive(
-                &"up://some_device/A100/1/9100"
+                &"up://some_device/A100/1/1/9100"
                     .parse()
                     .expect("failed to create source UUri"),
                 None

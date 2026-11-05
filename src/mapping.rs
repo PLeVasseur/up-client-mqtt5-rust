@@ -561,9 +561,9 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
-    const EVENT_SOURCE: &str = "//vin.vehicles/A8000/2/8A50";
-    const REPLY_TO: &str = "//vin.vehicles/A8000/2/0";
-    const METHOD: &str = "//vin.vehicles/B8000/3/1B50";
+    const EVENT_SOURCE: &str = "//vin.vehicles/8000/A/2/8A50";
+    const REPLY_TO: &str = "//vin.vehicles/8000/A/2/0";
+    const METHOD: &str = "//vin.vehicles/8000/B/3/1B50";
     const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
     fn build_test_message(

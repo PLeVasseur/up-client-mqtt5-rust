@@ -815,8 +815,8 @@ mod tests {
     #[tokio::test]
     async fn test_register_listener_starts_invoking_listeners() {
         let source_filter =
-            UUri::from_str("up://vin.vehicles/FFFF8000/2/8A50").expect("invalid source filter");
-        let source = UUri::from_str("//vin.vehicles/A8000/2/8A50").expect("invalid source");
+            UUri::from_str("up://vin.vehicles/8000/FFFF/2/8A50").expect("invalid source filter");
+        let source = UUri::from_str("//vin.vehicles/8000/A/2/8A50").expect("invalid source");
 
         let mut client_operations = MockMqttClientOperations::new();
         client_operations.expect_subscribe().return_const(Ok(()));
@@ -939,17 +939,17 @@ mod tests {
     }
 
     #[test_case(
-        "up://vin.vehicles/A8000/2/8A50",
+        "up://vin.vehicles/8000/A/2/8A50",
         "vin.vehicles";
         "Valid UUri"
     )]
     #[test_case(
-        "/A8000/2/8A50",
+        "/8000/A/2/8A50",
         "local_authority";
         "Local UUri"
     )]
     #[test_case(
-        "//*/A8000/2/8A50",
+        "//*/8000/A/2/8A50",
         "+";
         "Wildcard authority"
     )]
@@ -962,37 +962,37 @@ mod tests {
     }
 
     #[test_case(
-        "up://vin.vehicles/A8000/2/8A50",
+        "up://vin.vehicles/8000/A/2/8A50",
         "vin.vehicles/8000/A/2/8A50";
         "Valid UUri"
     )]
     #[test_case(
-        "/A8000/2/8A50",
+        "/8000/A/2/8A50",
         "local_authority/8000/A/2/8A50";
         "Local UUri"
     )]
     #[test_case(
-        "//*/A8000/2/8A50",
+        "//*/8000/A/2/8A50",
         "+/8000/A/2/8A50";
         "Wildcard authority"
     )]
     #[test_case(
-        "//vin.vehicles/FFFF/2/8A50",
-        "vin.vehicles/+/0/2/8A50";
+        "//vin.vehicles/FFFF/1/2/8A50",
+        "vin.vehicles/+/1/2/8A50";
         "Wildcard entity type id"
     )]
     #[test_case(
-        "//vin.vehicles/FFFF8000/2/8A50",
+        "//vin.vehicles/8000/FFFF/2/8A50",
         "vin.vehicles/8000/+/2/8A50";
         "Wildcard entity instance id"
     )]
     #[test_case(
-        "//vin.vehicles/A8000/FF/8A50",
+        "//vin.vehicles/8000/A/FF/8A50",
         "vin.vehicles/8000/A/+/8A50";
         "Wildcard entity version"
     )]
     #[test_case(
-        "//vin.vehicles/A8000/2/FFFF",
+        "//vin.vehicles/8000/A/2/FFFF",
         "vin.vehicles/8000/A/2/+";
         "Wildcard resource id"
     )]
@@ -1005,71 +1005,71 @@ mod tests {
     }
 
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
+        "//vin.vehicles/8000/A/2/8A50",
         None,
         TransportMode::InVehicle,
         "vin.vehicles/8000/A/2/8A50";
         "Publish to a specific topic"
     )]
     #[test_case(
-        "//vin.vehicles/A8000/2/8A50",
-        Some("//vin.vehicles/B8000/3/0"),
+        "//vin.vehicles/8000/A/2/8A50",
+        Some("//vin.vehicles/8000/B/3/0"),
         TransportMode::InVehicle,
         "vin.vehicles/8000/A/2/8A50/vin.vehicles/8000/B/3/0";
         "Send a notification"
     )]
     #[test_case(
-        "/A8000/2/0",
-        Some("/B8000/3/1B50"),
+        "/8000/A/2/0",
+        Some("/8000/B/3/1B50"),
         TransportMode::InVehicle,
         "local_authority/8000/A/2/0/local_authority/8000/B/3/1B50";
         "Send a local RPC request"
     )]
     #[test_case(
-        "//vin.vehicles/B8000/3/1B50",
-        Some("//vin.vehicles/A8000/2/0"),
+        "//vin.vehicles/8000/B/3/1B50",
+        Some("//vin.vehicles/8000/A/2/0"),
         TransportMode::InVehicle,
         "vin.vehicles/8000/B/3/1B50/vin.vehicles/8000/A/2/0";
         "Send an RPC Response"
     )]
     #[test_case(
-        "//*/FFFFFFFF/FF/FFFF",
-        Some("/AB34/1/12CD"),
+        "//*/FFFF/FFFF/FF/FFFF",
+        Some("/AB34/1/1/12CD"),
         TransportMode::InVehicle,
-        "+/+/+/+/+/local_authority/AB34/0/1/12CD";
+        "+/+/+/+/+/local_authority/AB34/1/1/12CD";
         "Subscribe to incoming RPC requests for a specific method"
     )]
     #[test_case(
-        "//*/FFFFFFFF/FF/FFFF",
-        Some("//service.backend/FFFFFFFF/FF/FFFF"),
+        "//*/FFFF/FFFF/FF/FFFF",
+        Some("//service.backend/FFFF/FFFF/FF/FFFF"),
         TransportMode::OffVehicle,
         "+/service.backend";
         "Subscribe to all incoming messages for uEntities on a given authority in the back end"
     )]
     #[test_case(
-        "//other_authority/FFFFFFFF/FF/FFFF",
+        "//other_authority/FFFF/FFFF/FF/FFFF",
         None,
         TransportMode::InVehicle,
         "other_authority/+/+/+/+";
         "Subscribe to all messages published to topics of a specific authority"
     )]
     #[test_case(
-        "//*/FFFFFFFF/FF/FFFF",
-        Some("/FFFFFFFF/FF/FFFF"),
+        "//*/FFFF/FFFF/FF/FFFF",
+        Some("/FFFF/FFFF/FF/FFFF"),
         TransportMode::OffVehicle,
         "+/local_authority";
         "Streamer subscribes to all inbound messages from the cloud"
     )]
     #[test_case(
-        "//*/FFFFFFFF/FF/FFFF",
+        "//*/FFFF/FFFF/FF/FFFF",
         None,
         TransportMode::InVehicle,
         "+/+/+/+/+";
         "Subscribe to all publish messages from devices within the vehicle"
     )]
     #[test_case(
-        "//other_authority/FFFFFFFF/FF/FFFF",
-        Some("//*/FFFFFFFF/FF/FFFF"),
+        "//other_authority/FFFF/FFFF/FF/FFFF",
+        Some("//*/FFFF/FFFF/FF/FFFF"),
         TransportMode::InVehicle,
         "other_authority/+/+/+/+/+/+/+/+/+";
         "Subscribe to all message types but publish messages sent from a specific authority"
@@ -1335,7 +1335,7 @@ mod tests {
             .collect()
     }
 
-    const CANCELLED_SOURCE_FILTER: &str = "//vin.vehicles/A8000/2/8A50";
+    const CANCELLED_SOURCE_FILTER: &str = "//vin.vehicles/8000/A/2/8A50";
     const CANCELLED_TOPIC_FILTER: &str = "vin.vehicles/8000/A/2/8A50";
 
     /// Starts registering a listener for [`CANCELLED_SOURCE_FILTER`] and drops the registration
@@ -1401,7 +1401,7 @@ mod tests {
 
         // the subscription ID of the cancelled registration can be used for another topic filter
         let other_source_filter =
-            UUri::from_str("//vin.vehicles/B8000/3/8A50").expect("invalid source filter");
+            UUri::from_str("//vin.vehicles/8000/B/3/8A50").expect("invalid source filter");
         let other_registration = transport
             .register_listener(&other_source_filter, None, listener.clone())
             .await;

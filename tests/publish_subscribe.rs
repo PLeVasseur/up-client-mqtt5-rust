@@ -46,7 +46,7 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
     // fixture
     let mosquitto =
         common::start_mosquitto(mosquitto_config, Some(PASSWD_FILE), None, Some(15000)).await;
-    let topic = UUri::from_str("//publisher/A8000/2/8A50").expect("invalid topic URI");
+    let topic = UUri::from_str("//publisher/8000/A/2/8A50").expect("invalid topic URI");
     let message_to_send = UMessageBuilder::publish(topic)
         .build_with_payload("test_payload", PayloadEncoding::TEXT)
         .expect("Failed to build message");
@@ -76,7 +76,7 @@ async fn test_publish_and_subscribe_succeeds_after_reconnect(mosquitto_config: O
         .await
         .expect("failed to connect subscriber to broker");
     let source_filter =
-        UUri::from_str("//publisher/A8000/2/FFFF").expect("Failed to create source filter");
+        UUri::from_str("//publisher/8000/A/2/FFFF").expect("Failed to create source filter");
     subscriber
         .register_listener(&source_filter, None, Arc::new(listener))
         .await
@@ -216,7 +216,7 @@ async fn test_publish_fails_if_unauthorized() {
         .await
         .expect("failed to connect publisher to broker");
 
-    let authorized_source = UUri::from_str("/A8000/2/8A50").unwrap();
+    let authorized_source = UUri::from_str("/8000/A/2/8A50").unwrap();
     assert!(
         publisher
             .send(UMessageBuilder::publish(authorized_source).build().unwrap())
@@ -225,7 +225,7 @@ async fn test_publish_fails_if_unauthorized() {
         "expected publishing to topic to succeed with correct authority"
     );
 
-    let unauthorized_source = UUri::from_str("/100/1/B500").unwrap();
+    let unauthorized_source = UUri::from_str("/100/1/1/B500").unwrap();
     assert!(
         publisher
             .send(
