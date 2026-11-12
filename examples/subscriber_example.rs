@@ -11,78 +11,85 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+//! Register an MQTT-backed uProtocol listener and receive published messages.
 use std::{
     str::{self, FromStr},
     sync::Arc,
+    thread,
 };
 
 use async_trait::async_trait;
-use env_logger::{Builder, Target};
-use log::LevelFilter;
-use up_rust::{UListener, UMessage, UStatus, UTransport, UUri, UUID};
-use up_transport_mqtt5::{MqttConfig, MqttProtocol, UPClientMqtt, UPClientMqttType};
+use backon::{ExponentialBuilder, Retryable};
+use clap::Parser;
+use tracing::{error, info};
+use up_rust::{UListener, UMessage, UStatus, UTransport, UUri};
+use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
 
-const WILDCARD_ENTITY_ID: u32 = 0x0000_FFFF;
-const WILDCARD_ENTITY_VERSION: u32 = 0x0000_00FF;
-const WILDCARD_RESOURCE_ID: u32 = 0x0000_FFFF;
-
-struct PrintlnListener {}
+struct LoggingListener {}
 
 #[async_trait]
-impl UListener for PrintlnListener {
+impl UListener for LoggingListener {
     async fn on_receive(&self, message: UMessage) {
-        let msg_payload = message.payload.unwrap();
-        let msg_str: &str = str::from_utf8(&msg_payload).unwrap();
-        println!("Received message: {msg_str}");
+        // Make sure to not block the incoming message handler by spawning a new task
+        // for processing the message.
+        // Note that this does not per se guarantee that the message will be processed
+        // on a different thread than the transport's incoming message handler but it
+        // does ensure that this function returns quickly, allowing the incoming message
+        // handler to proceed as soon as possible.
+        tokio::spawn(async move {
+            let msg_payload = message.payload().unwrap();
+            let msg_str: &str = str::from_utf8(&msg_payload).unwrap();
+            info!("Received message: {msg_str}");
+            // simulate some time consuming processing
+            thread::sleep(std::time::Duration::from_millis(500));
+            info!("Finished processing message");
+        });
     }
+}
+
+/// Consumes messages from topics matching a given filter using the MQTT 5 transport.
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Command {
+    /// The uProtocol filter URI to consume messages for.
+    #[arg(value_name = "URI", env = "TOPIC_FILTER", default_value = "up://vehicle_b/FFFF/FFFF/FF/FFFF", value_parser = UUri::from_str)]
+    topic_filter: UUri,
+
+    #[command(flatten)]
+    transport_options: Mqtt5TransportOptions,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), UStatus> {
-    Builder::new()
-        .target(Target::Stdout) // Logs to stdout
-        .filter(None, LevelFilter::Trace) // Default level
-        .init();
+    let _ = tracing_subscriber::fmt::try_init();
 
-    // Set the protocol type ("mqtt" for unencrypted mqtt)
-    let protocol = MqttProtocol::Mqtt;
+    let command = Command::parse();
+    let authority = command.topic_filter.authority_name().to_string();
+    let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
-    // no need to build ssl options since we are using unencrypted mqtt, username is arbitrary
-    let ssl_options = None;
-    let user_name = "eclipse_testuser".to_string();
-
-    let config = MqttConfig {
-        mqtt_protocol: protocol,
-        mqtt_hostname: "localhost".to_string(),
-        mqtt_port: 1883,
-        max_buffered_messages: 100,
-        max_subscriptions: 100,
-        session_expiry_interval: 3600,
-        ssl_options,
-        username: user_name,
-    };
-
-    let client = UPClientMqtt::new(
-        config,
-        UUID::build(),
-        "Vehicle_B".to_string(),
-        UPClientMqttType::Device,
-    )
+    (|| {
+        info!("Connecting to broker...");
+        client.connect()
+    })
+    .retry(ExponentialBuilder::default())
+    .when(|err| {
+        error!("Connection attempt failed: {err}");
+        true
+    })
     .await?;
 
-    let listener = Arc::new(PrintlnListener {});
-    let source_filter = UUri::from_str(&format!(
-        "//Vehicle_B/{WILDCARD_ENTITY_ID:X}/{WILDCARD_ENTITY_VERSION:X}/{WILDCARD_RESOURCE_ID:X}"
-    ))
-    .expect("Failed to create source filter");
+    let listener = Arc::new(LoggingListener {});
 
-    println!("Subscribing to: {}", source_filter.to_uri(false));
+    info!(
+        "Subscribing to topic: {}",
+        command.topic_filter.to_uri(true)
+    );
 
     client
-        .register_listener(&source_filter, None, listener.clone())
+        .register_listener(&command.topic_filter, None, listener.clone())
         .await?;
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install Ctrl-C handler");
+    Ok(())
 }

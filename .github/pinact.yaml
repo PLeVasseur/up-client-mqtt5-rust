@@ -1,0 +1,13 @@
+# Configuration file for Pinact, a tool to pin GitHub Actions and workflows to
+# specific commit hashes.
+#
+# The rules in this file are used to allow pinning shared workflows for uProtocol
+# without requiring a corresponding tag in the ci-cd repository.
+version: 3
+rules:
+- ignore: true
+  conditions:
+  - expr: |
+      ActionRepoOwner == 'eclipse-uprotocol' && ActionRepoName == 'ci-cd'
+  - expr: |
+      ActionRepoOwner == 'actions-rust-lang' && ActionRepoName == 'setup-rust-toolchain'

@@ -1,0 +1,222 @@
+# ********************************************************************************
+#  Copyright (c) 2024 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+# *******************************************************************************/
+
+# Comprehensive combination of checks, linting, feature-checks, testing to be run on merge and on PR
+# Upload test results for potential re-use in publication workflow, returns the corresponding download URL as an output on workflow_call
+
+name: Cargo check and clippy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "examples/**"
+      - "src/**"
+      - "tests/**"
+      - "Cargo.*"
+  workflow_call:
+    outputs:
+      test_results_url:
+        description: "URL of the test results artifact"
+        value: ${{ jobs.test.outputs.test_results_url }}
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || 'stable' }}
+  RUSTFLAGS: -Dwarnings
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read # needed for checking out the code
+
+jobs:
+  check:
+    name: "Perform basic checks with cargo check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Run cargo check
+        run: |
+          cargo check --workspace --all-targets --all-features
+
+  fmt:
+    name: "Check code formatting with cargo fmt"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: Run cargo fmt
+        run: |
+          cargo fmt --all --check
+
+  clippy:
+    name: "Check code with cargo clippy"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - name: Run cargo clippy
+        run: |
+          cargo clippy --version
+          cargo clippy --all-targets --all-features --no-deps -- -W warnings -D warnings
+
+  docu:
+    name: "Create documentation with cargo doc"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Run rustdoc
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: |
+          cargo doc --no-deps --all-features
+
+  check-links:
+    name: "Check links in markdown and source code files"
+    # check links contained in markdown and source code files
+    # sadly, lychee does not (yet) support checking links in Asciidoc files
+    # https://github.com/lycheeverse/lychee/issues/291
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - name: Restore lychee cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.sha }}
+          restore-keys: cache-lychee-
+
+      - name: Run lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: |
+            --cache --max-cache-age 1d --verbose --no-progress --exclude-path './target/' --exclude-path './up-spec/' -- './**/*.md' './**/*.rs' './**/*.toml' './**/*.yaml'
+
+  feature-check:
+    name: "Check feature flag combinations"
+    # Comprehensive check for feature flag combinations, excluding development dependencies
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install cargo-hack
+        env:
+          CARGO_HACK_VERSION: "v0.6.45"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # See https://github.com/taiki-e/cargo-hack#from-prebuilt-binaries
+          # Get host target.
+          host=$(rustc -vV | grep '^host:' | cut -d' ' -f2)
+          # Download binary.
+          curl --proto '=https' --tlsv1.2 -fsSL -o cargo-hack.tar.gz "https://github.com/taiki-e/cargo-hack/releases/download/${CARGO_HACK_VERSION}/cargo-hack-${host}.tar.gz"
+          # Verify release attestations.
+          gh release -R https://github.com/taiki-e/cargo-hack verify-asset cargo-hack.tar.gz
+          # Verify artifact attestations.
+          gh attestation verify --repo taiki-e/cargo-hack --signer-workflow taiki-e/github-actions/.github/workflows/rust-release.yml cargo-hack.tar.gz
+          # Install to $CARGO_HOME/bin (or $HOME/.cargo/bin if CARGO_HOME is unset).
+          tar xf cargo-hack.tar.gz -C "${CARGO_HOME:-"$HOME/.cargo"}"/bin
+          # Remove archive.
+          rm cargo-hack.tar.gz
+      - name: Run cargo hack powerset
+        run: |
+          cargo hack check --feature-powerset --no-dev-deps
+
+  test:
+    name: "Run tests with cargo test"
+    # Run tests for a subset of feature combinations, on only one OS - more complete testing in test-featurematrix.yaml
+    needs: feature-check
+    # Subset of feature-combos, on only one OS - more complete testing in test-featurematrix.yaml
+    outputs:
+      test_results_url: ${{ steps.test_results.outputs.artifact-url }}
+    runs-on: ubuntu-latest
+    env:
+      UP_MQTT5_REQUIRE_BROKER: "1"
+    strategy:
+      matrix:
+        feature-flags: ["", "--no-default-features", "--all-features"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: "recursive"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Prepare Mosquitto image
+        run: docker pull eclipse-mosquitto:2.0
+      - name: Check broker build configuration
+        run: python3 tools/test_broker_detection.py
+      - name: Run lib tests
+        run: |
+          mkdir -p ${GITHUB_WORKSPACE}/target
+          RUSTC_BOOTSTRAP=1 cargo test \
+            --no-fail-fast \
+            --all-targets \
+            ${{ matrix.feature-flags }} -- \
+            -Z unstable-options --format junit --report-time \
+            > ${GITHUB_WORKSPACE}/target/lib-test-results.xml
+      - name: Run doc tests
+        run: |
+          RUSTC_BOOTSTRAP=1 cargo test \
+            --no-fail-fast \
+            --doc \
+            ${{ matrix.feature-flags }} -- \
+            -Z unstable-options --format junit --report-time \
+            > ${GITHUB_WORKSPACE}/target/doc-test-results.xml
+
+      - name: Upload all-features test results artifact
+        id: test_results
+        if: matrix.feature-flags == '--all-features'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results
+          # include all test result files
+          path: target/*-results.xml

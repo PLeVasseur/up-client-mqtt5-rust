@@ -1,0 +1,49 @@
+# ********************************************************************************
+#  Copyright (c) 2025 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+# *******************************************************************************/
+
+# Config file for cargo deny
+# For all options see https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.template.toml
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "EPL-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0", # borrow-or-share, used by the SDK's fluent-uri parser
+    # Unicode-3.0 is not (yet) on the Eclipse Foundation's list of approved licenses
+    # however, all of its predecessors are, thus we assume that 3.0 is also ok to use
+    "Unicode-3.0",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip-tree = [
+    { crate = "windows-sys", reason = "a foundational crate for many that bumps far too frequently to ever have a shared version" },
+    { crate = "testcontainers", reason = "this crate (and its deps) is only used for testing" },
+]
+
+[advisories]
+ignore = [
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/PLeVasseur/up-rust.git",
+]

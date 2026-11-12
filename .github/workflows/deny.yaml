@@ -1,0 +1,42 @@
+# ********************************************************************************
+#  Copyright (c) 2025 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+# *******************************************************************************/
+
+# Runs cargo deny when Cargo.toml or Cargo.lock has been changed
+
+name: Deny
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: ${{ vars.RUST_TOOLCHAIN || 'stable' }}
+  RUSTFLAGS: -Dwarnings
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read # needed for checking out the code
+
+jobs:
+  deny:
+    name: "Check for CVEs and other issues with cargo-deny"
+    uses: eclipse-uprotocol/ci-cd/.github/workflows/rust-deny-check.yaml@ad3f99eac0675c714f08c473412dae14d9fecaa8 # main
+    with:
+      arguments: --all-features --locked --exclude-dev

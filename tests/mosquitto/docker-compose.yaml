@@ -1,8 +1,27 @@
+# ********************************************************************************
+#  Copyright (c) 2025 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0
+#
+#  SPDX-License-Identifier: Apache-2.0
+# *******************************************************************************/
+
+volumes:
+  mosquitto.db:
+
 services:
   mosquitto:
     image: eclipse-mosquitto:2.0
     volumes:
       # read-only prevents the container changing file owners on the host
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - type: volume
+        source: mosquitto.db
+        target: /mosquitto/data
     ports:
       - 1883:1883

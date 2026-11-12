@@ -1,0 +1,77 @@
+= Implementation Design
+:toc: preamble
+:sectnums:
+
+----
+SPDX-FileCopyrightText: 2024 Contributors to the Eclipse Foundation
+
+See the NOTICE file(s) distributed with this work for additional
+information regarding copyright ownership.
+
+This program and the accompanying materials are made available under
+the terms of the Apache License Version 2.0 which is available at
+https://www.apache.org/licenses/LICENSE-2.0
+ 
+SPDX-FileType: DOCUMENTATION
+SPDX-License-Identifier: Apache-2.0
+----
+
+== Overview
+
+This document contains information regarding some design decisions made for the implementation of the transport.
+
+[.specitem,oft-sid="dsn~utransport-send-ignore-priority~1",oft-covers="req~utransport-send-qos-mapping~1"]
+== Message Priority Mapping
+
+The MQTT 5 standard does not define any mechanism for message prioritization. All messages are being processed with the same priority.
+Consequently, the MQTT 5 transport provided by this crate simply ignores the service class set on a uProtocol message being sent.
+
+[.specitem,oft-sid="dsn~utransport-supported-message-delivery~1",oft-covers="req~utransport-delivery-methods~1",oft-needs="impl,utest"]
+== Message Delivery
+
+All messages are being received by means of subscribing to relevant topics on the MQTT broker and delivering the messages to listeners that have been registered via `up_rust::UTransport::register_listener`.
+The transport spawns a dedicated [tokio task](https://tokio.rs/tokio/tutorial/spawning#tasks) that listens for incoming messages and dispatches them to the registered listeners on the same thread that the message handling task runs on.
+
+Rationale:
+The MQTT 5 standard does not provide means to poll the broker for messages but only supports the push model by means of clients subscribing to topic filters.
+
+The transport requires a tokio runtime to execute but does not make any implicit assumption regarding the availability and size of thread pools. This provides for flexibility regarding the environment that the transport can be deployed to but also requires application developers to take care when implementing message listeners, making sure to not block the transport's incoming message handler when processing a dispatched message.
+
+[.specitem,oft-sid="dsn~mqtt5-transport-authorization~1",oft-covers="req~utransport-registerlistener-prevent-unauthorized-access~1,req~utransport-send-prevent-address-spoofing~1",oft-needs="impl,utest"]
+## Authorization
+
+This crate provides an implementation of the uProtocol Transport Layer API. This API can be used by client code (uEntities) for sending and/or receiving messages to/from other uEntities. In general, this crate **does not** impose any restrictions on a message's source and sink addresses when handling messages. In particular, the crate itself **does not** verify a uEntity's _identity_ nor checks a uEntity's _authority_ to send and/or receive messages using particular addresses (UUris).
+
+However, the transport implementation provided by this crate supports the configuration of client credentials (username/password and/or X.509 certificate) for authenticating to an MQTT 5 broker during connection establishment.
+
+When a uEntity using this transport tries to connect to a broker using invalid credentials, the broker will return an MQTT _CONNACK_ packet including a corresponding _Reason Code_ back to the client (see section 3.2.2.2 of the MQTT 5 specification for details). This transport's function for connecting to the broker will fail with a `UStatus` error having a `UCode` as defined in <<Mapping of MQTT 5 Reason Codes to UCodes>>.
+
+Most MQTT brokers allow the configuration of _Access Control Lists_ (ACL), which can be used to restrict a client identity's access to certain MQTT topic patterns only. Given a set of ACLs for a uEntity using this transport implementation:
+
+1. When the uEntity tries to send a message using a source and/or sink address which map to an MQTT topic that the client is not authorized to publish to, the broker will return an MQTT _PUBACK_ packet including a corresponding failure _Reason Code_ to the client (see section 3.4.2.1 of the MQTT 5 specification for details).
+2. When a uEntity tries to subscribe to messages using a source and/or sink address pattern which results in an MQTT topic that the client is not authorized to subscribe to, the broker will return a corresponding _Reason Code_ in its MQTT _SUBACK_ packet sent back to the client (see section 3.9.3 of the MQTT 5 specification for details).
+
+The transport implementation will fail the invoked function with a `UStatus` error having a `UCode` as defined in <<Mapping of MQTT 5 Reason Codes to UCodes>>.
+
+[#reason-code-mapping]
+[.specitem,oft-sid="dsn~mapping-of-reason-codes~1",oft-needs="impl,utest"]
+## Mapping of MQTT 5 Reason Codes to UCodes
+
+This transport maps Reason Codes from MQTT 5 packets to uProtocol `UCode`s as follows
+
+[width="50%",cols="1,2"]
+|===
+| Reason Code | UCode
+
+|`0x86`|`UNAUTHENTICATED`
+|`0x87`|`PERMISSION_DENIED`
+|`0x88`|`UNAVAILABLE`
+|`0x89`|`UNAVAILABLE`
+|`0x8C`|`UNAUTHENTICATED`
+|`0x96`|`RESOURCE_EXHAUSTED`
+|`0x97`|`RESOURCE_EXHAUSTED`
+|`0x9F`|`RESOURCE_EXHAUSTED`
+|`0xA0`|`RESOURCE_EXHAUSTED`
+|===
+
+All other (error) reason codes > 0x80 are mapped to `INTERNAL`.

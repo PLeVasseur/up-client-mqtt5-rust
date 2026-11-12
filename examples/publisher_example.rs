@@ -11,67 +11,69 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+//! Publish classic uProtocol messages through a configured MQTT 5 broker connection.
 use std::{str::FromStr, time::SystemTime};
 
-use env_logger::{Builder, Target};
-use log::LevelFilter;
-use up_rust::{UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri, UUID};
-use up_transport_mqtt5::{MqttConfig, MqttProtocol, UPClientMqtt, UPClientMqttType};
+use backon::{ExponentialBuilder, Retryable};
+use clap::Parser;
+use tracing::{error, info};
+use up_rust::{PayloadEncoding, UMessageBuilder, UStatus, UTransport, UUri};
+use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions};
+
+/// Publishes messages to a given topic using the MQTT 5 transport.
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Command {
+    /// The uProtocol topic to publish messages to.
+    #[arg(value_name = "URI", env = "TOPIC", default_value = "up://vehicle_b/8000/A/2/8A50", value_parser = UUri::from_str)]
+    topic: UUri,
+
+    #[command(flatten)]
+    transport_options: Mqtt5TransportOptions,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), UStatus> {
-    Builder::new()
-        .target(Target::Stdout) // Logs to stdout
-        .filter(None, LevelFilter::Trace) // Default level
-        .init();
+    let _ = tracing_subscriber::fmt::try_init();
 
-    // Set the protocol type ("mqtt" for unencrypted mqtt)
-    let protocol = MqttProtocol::Mqtt;
+    let command = Command::parse();
+    let authority = command.topic.authority_name().to_string();
 
-    // no need to build ssl options since we are using unencrypted mqtt, username is arbitrary
-    let ssl_options = None;
-    let user_name = "eclipse_testuser".to_string();
+    let client = Mqtt5Transport::new(command.transport_options, authority).await?;
 
-    let config = MqttConfig {
-        mqtt_protocol: protocol,
-        mqtt_hostname: "localhost".to_string(),
-        mqtt_port: 1883,
-        max_buffered_messages: 100,
-        max_subscriptions: 100,
-        session_expiry_interval: 3600,
-        ssl_options,
-        username: user_name,
-    };
-
-    let client = UPClientMqtt::new(
-        config,
-        UUID::build(),
-        "Vehicle_B".to_string(),
-        UPClientMqttType::Device,
-    )
+    (|| {
+        info!("Connecting to broker...");
+        client.connect()
+    })
+    .retry(ExponentialBuilder::default())
+    .when(|err| {
+        error!("Connection attempt failed: {err}");
+        true
+    })
     .await?;
 
-    let source =
-        UUri::from_str("//Vehicle_B/A8000/2/8A50").expect("Failed to create source filter");
-
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let current_time = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let message = UMessageBuilder::publish(source.clone())
-            .build_with_payload(
-                current_time.to_string(),
-                UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-            )
+        let message = UMessageBuilder::publish(command.topic.clone())
+            .with_ttl(1000)
+            .build_with_payload(current_time.to_string(), PayloadEncoding::TEXT)
             .expect("Failed to build message");
 
-        println!(
-            "Sending message: {} to source: {}",
-            current_time,
-            source.to_uri(false)
-        );
-        client.send(message).await?;
+        if let Err(e) = client.send(message).await {
+            error!(
+                "Failed to publish message [topic: {}]: {}",
+                command.topic.to_uri(true),
+                e
+            );
+        } else {
+            info!(
+                "Successfully published message [topic: {}]",
+                command.topic.to_uri(true),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
